@@ -31,10 +31,15 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
 @available(macOS 14.0, *)
 struct SettingsView: View {
-    @State private var selectedCategory: SettingsCategory = .profiles
+    @State private var _selectedCategory: SettingsCategory = .profiles
 
     // Profiles
-    @State private var selectedProfileId: String? = nil
+    @State private var _selectedProfileId: String? = nil
+    @State private var isEditorDirty = false
+    @State private var yamlText = ""
+    @State private var pendingCategory: SettingsCategory? = nil
+    @State private var pendingProfileId: String? = nil
+    @State private var showDiscardAlert = false
 
     // Files
     @StateObject private var fileVM = FileManageViewModel()
@@ -44,10 +49,79 @@ struct SettingsView: View {
     @State private var loggingEnabled = AppGroupConfig.loggingEnabled
     @State private var logLevel = AppGroupConfig.logLevel
 
+    // Keep old property names for code that reads them (switch statements etc)
+    private var selectedCategory: SettingsCategory { _selectedCategory }
+    private var selectedProfileId: String? { _selectedProfileId }
+
+    private var categoryBinding: Binding<SettingsCategory> {
+        Binding(
+            get: { _selectedCategory },
+            set: { newValue in
+                if isCurrentEditorDirty && newValue != _selectedCategory {
+                    pendingCategory = newValue
+                    showDiscardAlert = true
+                } else {
+                    _selectedCategory = newValue
+                }
+            }
+        )
+    }
+
+    private var profileIdBinding: Binding<String?> {
+        Binding(
+            get: { _selectedProfileId },
+            set: { newValue in
+                if isCurrentEditorDirty && newValue != _selectedProfileId {
+                    pendingProfileId = newValue
+                    showDiscardAlert = true
+                } else {
+                    _selectedProfileId = newValue
+                }
+            }
+        )
+    }
+
+    private var isCurrentEditorDirty: Bool {
+        switch _selectedCategory {
+        case .profiles: return _selectedProfileId != nil && isEditorDirty
+        case .files: return fileVM.selectedFileName != nil && fileVM.isFileDirty
+        case .logs: return false
+        }
+    }
+
+    private func saveCurrentEditor() {
+        switch _selectedCategory {
+        case .profiles:
+            if let id = _selectedProfileId {
+                ConfigRepository.shared.saveConfig(id, yaml: yamlText)
+                if id == ConfigRepository.shared.activeProfileId {
+                    AppGroupConfig.writeYaml(yamlText)
+                }
+                isEditorDirty = false
+            }
+        case .files:
+            fileVM.saveFileContent()
+            fileVM.isFileDirty = false
+        case .logs:
+            break
+        }
+    }
+
+    private func applyPendingNavigation() {
+        if let cat = pendingCategory {
+            _selectedCategory = cat
+            pendingCategory = nil
+        }
+        if let pid = pendingProfileId {
+            _selectedProfileId = pid
+            pendingProfileId = nil
+        }
+    }
+
     var body: some View {
         NavigationSplitView {
             // Sidebar
-            List(selection: $selectedCategory) {
+            List(selection: categoryBinding) {
                 ForEach(SettingsCategory.allCases) { category in
                     Label(category.label, systemImage: category.icon)
                         .tag(category)
@@ -59,7 +133,7 @@ struct SettingsView: View {
             // Content
             switch selectedCategory {
             case .profiles:
-                ProfileListView(selectedProfileId: $selectedProfileId)
+                ProfileListView(selectedProfileId: profileIdBinding)
                     .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
             case .files:
                 FileListView(vm: fileVM)
@@ -73,7 +147,7 @@ struct SettingsView: View {
             switch selectedCategory {
             case .profiles:
                 if let profileId = selectedProfileId {
-                    YamlEditorView(profileId: profileId)
+                    YamlEditorView(profileId: profileId, isDirty: $isEditorDirty, yamlText: $yamlText)
                         .id(profileId)
                         .ignoresSafeArea(.container, edges: .top)
                 } else {
@@ -100,6 +174,28 @@ struct SettingsView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 700, minHeight: 440)
+        .background(WindowCloseHandler(
+            isDirty: isCurrentEditorDirty,
+            saveHandler: { [isCurrentEditorDirty, saveCurrentEditor] in
+                if isCurrentEditorDirty { saveCurrentEditor() }
+            }
+        ))
+        .alert(NSLocalizedString("Unsaved Changes", comment: ""),
+               isPresented: $showDiscardAlert) {
+            Button(NSLocalizedString("Save", comment: "")) {
+                saveCurrentEditor()
+                applyPendingNavigation()
+            }
+            Button(NSLocalizedString("Discard", comment: "")) {
+                applyPendingNavigation()
+            }
+            Button(NSLocalizedString("Cancel", comment: ""), role: .cancel) {
+                pendingCategory = nil
+                pendingProfileId = nil
+            }
+        } message: {
+            Text(NSLocalizedString("Do you want to save the changes you made before leaving?", comment: ""))
+        }
     }
 
     private func placeholderView(icon: String, text: String) -> some View {
@@ -120,9 +216,9 @@ struct SettingsView: View {
 @available(macOS 14.0, *)
 struct YamlEditorView: View {
     let profileId: String
+    @Binding var isDirty: Bool
+    @Binding var yamlText: String
     @StateObject private var repo = ConfigRepository.shared
-    @State private var yamlText: String = ""
-    @State private var isDirty = false
     @State private var originalText: String = ""
 
     var body: some View {
@@ -151,7 +247,6 @@ struct YamlEditorView: View {
                     Label(NSLocalizedString("Save", comment: ""), systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.borderless)
-                .disabled(!isDirty)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -165,6 +260,53 @@ struct YamlEditorView: View {
             AppGroupConfig.writeYaml(yamlText)
         }
     }
+}
+
+// MARK: - Window Close Handler
+
+/// Intercepts window close to prompt for unsaved changes.
+private struct WindowCloseHandler: NSViewRepresentable {
+    let isDirty: Bool
+    let saveHandler: (() -> Void)?
+
+    class Coordinator: NSObject, NSWindowDelegate {
+        var onClose: (() -> Bool)?
+
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            onClose?() ?? true
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            view.window?.delegate = context.coordinator
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onClose = { [isDirty, saveHandler] in
+            guard isDirty else { return true }
+            let alert = NSAlert()
+            alert.messageText = NSLocalizedString("Unsaved Changes", comment: "")
+            alert.informativeText = NSLocalizedString("Do you want to save the changes you made before closing?", comment: "")
+            alert.addButton(withTitle: NSLocalizedString("Save", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Discard", comment: ""))
+            alert.addButton(withTitle: NSLocalizedString("Cancel", comment: ""))
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                saveHandler?()
+                return true
+            case .alertSecondButtonReturn:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 }
 
 @available(macOS 14.0, *)

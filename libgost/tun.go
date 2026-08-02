@@ -22,7 +22,6 @@ import (
 	gostchain "github.com/go-gost/core/chain"
 	xchain "github.com/go-gost/x/chain"
 	"github.com/go-gost/x/registry"
-	"github.com/sirupsen/logrus"
 )
 
 // trackableConn pairs a TUN-side connection with its upstream proxy connection.
@@ -121,6 +120,7 @@ func startVPNSingTun(fd, mtu int, chainName, dnsServiceAddr string) error {
 	// does not affect the original.
 	dupFd, err := unix.Dup(fd)
 	if err != nil {
+		log().Errorf("StartTun: dup TUN fd: %v", err)
 		return fmt.Errorf("dup TUN fd: %w", err)
 	}
 
@@ -129,12 +129,12 @@ func startVPNSingTun(fd, mtu int, chainName, dnsServiceAddr string) error {
 	if chainName != "" {
 		chainer = registry.ChainRegistry().Get(chainName)
 		if chainer == nil {
-			logrus.Warnf("chain %q not found in registry – traffic will route directly", chainName)
+			log().Warnf("chain %q not found in registry – traffic will route directly", chainName)
 		} else {
-			logrus.Infof("chain %q found, sing-tun stack starting (fd=%d mtu=%d type=%s)", chainName, fd, mtu, tunStackType)
+			log().Infof("chain %q found, sing-tun stack starting (fd=%d mtu=%d type=%s)", chainName, fd, mtu, tunStackType)
 		}
 	} else {
-		logrus.Infof("no chain name – stack will route directly (fd=%d mtu=%d type=%s)", fd, mtu, tunStackType)
+		log().Infof("no chain name – stack will route directly (fd=%d mtu=%d type=%s)", fd, mtu, tunStackType)
 	}
 	router := xchain.NewRouter(
 		gostchain.ChainRouterOption(chainer),
@@ -143,6 +143,7 @@ func startVPNSingTun(fd, mtu int, chainName, dnsServiceAddr string) error {
 	prefix, err := netip.ParsePrefix(tunVPNPrefix)
 	if err != nil {
 		unix.Close(dupFd)
+		log().Errorf("StartTun: parse TUN prefix %q: %v", tunVPNPrefix, err)
 		return fmt.Errorf("parse TUN prefix %q: %w", tunVPNPrefix, err)
 	}
 	tunOptions := singtun.Options{
@@ -155,6 +156,7 @@ func startVPNSingTun(fd, mtu int, chainName, dnsServiceAddr string) error {
 	device, err := singtun.New(tunOptions)
 	if err != nil {
 		unix.Close(dupFd)
+		log().Errorf("StartTun: create TUN device: %v", err)
 		return fmt.Errorf("create TUN device: %w", err)
 	}
 
@@ -169,21 +171,23 @@ func startVPNSingTun(fd, mtu int, chainName, dnsServiceAddr string) error {
 		TunOptions: tunOptions,
 		UDPTimeout: 30 * time.Second,
 		Handler:    handler,
-		Logger:     &logrusAdapter{},
+		Logger:     &singLogAdapter{},
 	})
 	if err != nil {
 		cancel()
 		device.Close()
+		log().Errorf("StartTun: create sing-tun stack (type=%s): %v", tunStackType, err)
 		return fmt.Errorf("create sing-tun stack: %w", err)
 	}
 
 	if err := stack.Start(); err != nil {
 		cancel()
 		device.Close()
+		log().Errorf("StartTun: start sing-tun stack (type=%s): %v", tunStackType, err)
 		return fmt.Errorf("start sing-tun stack: %w", err)
 	}
 	ifaceName, _ := device.Name()
-	logrus.Infof("sing-tun stack started (type=%s iface=%s tcp_listener=%s, dns=%s)", tunStackType, ifaceName,
+	log().Infof("sing-tun stack started (type=%s iface=%s tcp_listener=%s, dns=%s)", tunStackType, ifaceName,
 		tunVPNPrefix, dnsServiceAddr)
 
 	tunStack = stack
@@ -300,7 +304,7 @@ func (h *singTunHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 		}()
 		defer func() {
 			if r := recover(); r != nil {
-				logrus.Errorf("[tcp] panic: %v", r)
+				log().Errorf("[tcp] panic: %v", r)
 			}
 		}()
 
@@ -311,15 +315,14 @@ func (h *singTunHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 		active := h.activeConns.Add(1)
 		defer h.activeConns.Add(-1)
 		if active > maxActiveTCPConns {
-			logrus.Warnf("[tcp] connection limit (%d) reached, dropping %v->%v",
+			log().Warnf("[tcp] connection limit (%d) reached, dropping %v->%v",
 				maxActiveTCPConns, source, destination)
 			atomic.AddInt64(&failedConns, 1)
 			return
 		}
 
 		dst := net.JoinHostPort(destination.Addr.String(), strconv.Itoa(int(destination.Port)))
-		n := atomic.AddInt64(&tcpConns, 1)
-		logrus.Debugf("[tcp#%d] dial %s", n, dst)
+		atomic.AddInt64(&tcpConns, 1)
 
 		var upstream net.Conn
 		var err error
@@ -332,13 +335,11 @@ func (h *singTunHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 		}
 		if err != nil {
 			atomic.AddInt64(&failedConns, 1)
-			logrus.Errorf("[tcp#%d] dial %s failed: %v", n, dst, err)
 			return
 		}
 		tc.setUpstream(upstream)
 
-		relay(conn, upstream)
-		logrus.Debugf("[tcp#%d] done %s", n, dst)
+		relay(tc, conn, upstream)
 	}()
 }
 
@@ -355,13 +356,12 @@ func (h *singTunHandler) NewPacketConnectionEx(ctx context.Context, conn N.Packe
 		}()
 		defer func() {
 			if r := recover(); r != nil {
-				logrus.Errorf("[udp] panic: %v", r)
+				log().Errorf("[udp] panic: %v", r)
 			}
 		}()
 
 		dst := net.JoinHostPort(destination.Addr.String(), strconv.Itoa(int(destination.Port)))
-		n := atomic.AddInt64(&udpConns, 1)
-		logrus.Debugf("[udp#%d] dial %s", n, dst)
+		atomic.AddInt64(&udpConns, 1)
 
 		var upstream net.Conn
 		var err error
@@ -374,12 +374,11 @@ func (h *singTunHandler) NewPacketConnectionEx(ctx context.Context, conn N.Packe
 		}
 		if err != nil {
 			atomic.AddInt64(&failedConns, 1)
-			logrus.Errorf("[udp#%d] dial %s failed: %v", n, dst, err)
 			return
 		}
 		tc.setUpstream(upstream)
 
-		relayPacketConn(conn, upstream, destination)
+		relayPacketConn(tc, conn, upstream, destination)
 	}()
 }
 
@@ -394,7 +393,15 @@ const udpUpstreamReadBufferSize = 65535
 // relayPacketConn pipes data bidirectionally between a sing-tun PacketConn
 // (one UDP session from the TUN device) and a plain net.Conn (upstream proxy).
 // Each Read/Write on the upstream corresponds to one datagram.
-func relayPacketConn(src N.PacketConn, dst net.Conn, remoteAddr M.Socksaddr) {
+// relayPacketConn pipes data bidirectionally between a sing-tun PacketConn
+// (one UDP session from the TUN device) and a plain net.Conn (upstream proxy).
+// Each Read/Write on the upstream corresponds to one datagram.
+//
+// As with relay(), either direction closing calls tc.Close() so the other
+// blocked read (e.g. an idle UDP session whose upstream QUIC read never
+// returns after sing-tun's 30s UDPTimeout) is unblocked and the relay
+// terminates, preventing upstream-connection and goroutine leaks.
+func relayPacketConn(tc *trackableConn, src N.PacketConn, dst net.Conn, remoteAddr M.Socksaddr) {
 	done := make(chan struct{}, 2)
 
 	// TUN → upstream proxy
@@ -412,6 +419,7 @@ func relayPacketConn(src N.PacketConn, dst net.Conn, remoteAddr M.Socksaddr) {
 			}
 		}
 		closeWrite(dst)
+		tc.Close()
 	}()
 
 	// upstream proxy → TUN
@@ -434,10 +442,12 @@ func relayPacketConn(src N.PacketConn, dst net.Conn, remoteAddr M.Socksaddr) {
 				break
 			}
 		}
+		tc.Close()
 	}()
 
 	<-done
 	<-done
+	tc.Close()
 }
 
 // tcpRelayBufferSize matches io.Copy's own default buffer size (32 KiB),
@@ -445,16 +455,24 @@ func relayPacketConn(src N.PacketConn, dst net.Conn, remoteAddr M.Socksaddr) {
 // buffer comes from.
 const tcpRelayBufferSize = 32 * 1024
 
-// relay pipes data bidirectionally between src and dst. When one direction
-// reaches EOF, CloseWrite is called on the other side so the remote peer
-// receives a proper FIN and the other goroutine unblocks.
-func relay(src, dst net.Conn) {
+// relay pipes data bidirectionally between src and dst. When either direction
+// reaches EOF/error it closes the whole tracked connection (via tc) so the
+// other, possibly-blocked read is unblocked and relay() always returns.
+//
+// This is essential: a silently-dead peer (common with UDP/QUIC upstreams such
+// as hysteria, which never deliver a FIN/RST) leaves one goroutine blocked on
+// a read forever. Without the forced tc.Close() here, relay() would never
+// return, defer tc.Close() would never run, and the upstream connection +
+// goroutines would leak until the VPN is restarted — the classic "degrades
+// over time, restart fixes" symptom.
+func relay(tc *trackableConn, src, dst net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
 		buf := singbuf.Get(tcpRelayBufferSize)
 		defer singbuf.Put(buf)
 		io.CopyBuffer(dst, src, buf)
 		closeWrite(dst)
+		tc.Close()
 		done <- struct{}{}
 	}()
 	go func() {
@@ -462,10 +480,12 @@ func relay(src, dst net.Conn) {
 		defer singbuf.Put(buf)
 		io.CopyBuffer(src, dst, buf)
 		closeWrite(src)
+		tc.Close()
 		done <- struct{}{}
 	}()
 	<-done
 	<-done
+	tc.Close()
 }
 
 // closeWrite signals write-EOF on c if it supports half-close (e.g. TCP).
@@ -478,21 +498,26 @@ func closeWrite(c net.Conn) {
 	}
 }
 
-// logrusAdapter adapts logrus to sing's logger.Logger interface.
+// singLogAdapter adapts the shared logger to sing's logger.Logger interface.
 // Trace is mapped to Debug so that sing-tun internal messages (e.g.
 // "unknown session with port N") are visible in the log output.
-type logrusAdapter struct{}
+type singLogAdapter struct{}
 
-func (l *logrusAdapter) Trace(args ...any) { logrus.Debug(args...) }
-func (l *logrusAdapter) Debug(args ...any) { logrus.Debug(args...) }
-func (l *logrusAdapter) Info(args ...any)  { logrus.Info(args...) }
-func (l *logrusAdapter) Warn(args ...any)  { logrus.Warn(args...) }
-func (l *logrusAdapter) Error(args ...any) { logrus.Error(args...) }
-func (l *logrusAdapter) Fatal(args ...any) { logrus.Fatal(args...) }
-func (l *logrusAdapter) Panic(args ...any) { logrus.Panic(args...) }
+func (l *singLogAdapter) Trace(args ...any) { log().Debug(args...) }
+func (l *singLogAdapter) Debug(args ...any) { log().Debug(args...) }
+func (l *singLogAdapter) Info(args ...any)  { log().Info(args...) }
+func (l *singLogAdapter) Warn(args ...any)  { log().Warn(args...) }
+func (l *singLogAdapter) Error(args ...any) { log().Error(args...) }
+func (l *singLogAdapter) Fatal(args ...any) { log().Fatal(args...) }
 
-// Ensure logrusAdapter satisfies the logger.Logger interface at compile time.
-var _ logger.Logger = (*logrusAdapter)(nil)
+// Panic logs and then panics, matching the previous logrus.Panic behaviour.
+func (l *singLogAdapter) Panic(args ...any) {
+	log().Error(args...)
+	panic(fmt.Sprint(args...))
+}
+
+// Ensure singLogAdapter satisfies the logger.Logger interface at compile time.
+var _ logger.Logger = (*singLogAdapter)(nil)
 
 // PauseTun is called when the device enters doze (idle) mode.
 // After a 3-second delay it closes all tracked connections so that relay
@@ -508,7 +533,7 @@ func PauseTun() {
 		h := tunHandler
 		tunMu.Unlock()
 		if h != nil {
-			logrus.Info("[pause] doze mode: closing all tracked connections")
+			log().Info("[pause] doze mode: closing all tracked connections")
 			h.closeTracked()
 		}
 	})
@@ -528,7 +553,7 @@ func WakeTun() {
 		h := tunHandler
 		tunMu.Unlock()
 		if h != nil {
-			logrus.Info("[wake] doze ended: resetting connections")
+			log().Info("[wake] doze ended: resetting connections")
 			h.closeTracked()
 		}
 	})
@@ -541,7 +566,7 @@ func ResetTunConnections() {
 	h := tunHandler
 	tunMu.Unlock()
 	if h != nil {
-		logrus.Info("[reset] manually closing all tracked connections")
+		log().Info("[reset] manually closing all tracked connections")
 		h.closeTracked()
 	}
 }
