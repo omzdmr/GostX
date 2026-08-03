@@ -20,11 +20,11 @@ import (
 	serviceparser "github.com/go-gost/x/config/parsing/service"
 	xdialer "github.com/go-gost/x/dialer"
 	"github.com/go-gost/x/registry"
-	"github.com/sirupsen/logrus"
 
 	_ "github.com/go-gost/x/connector/direct"
 	_ "github.com/go-gost/x/connector/http"
 	_ "github.com/go-gost/x/connector/http2"
+	_ "github.com/go-gost/x/connector/hysteria"
 	_ "github.com/go-gost/x/connector/relay"
 	_ "github.com/go-gost/x/connector/sni"
 	_ "github.com/go-gost/x/connector/socks/v4"
@@ -33,6 +33,7 @@ import (
 	_ "github.com/go-gost/x/connector/tcp"
 	_ "github.com/go-gost/x/dialer/grpc"
 	_ "github.com/go-gost/x/dialer/http2"
+	_ "github.com/go-gost/x/dialer/hysteria"
 	_ "github.com/go-gost/x/dialer/http2/h2"
 	_ "github.com/go-gost/x/dialer/http3"
 	_ "github.com/go-gost/x/dialer/mws"
@@ -129,14 +130,15 @@ func Start(yamlConfig string) (err error) {
 		return fmt.Errorf("invalid YAML config: %w", err)
 	}
 	ensureServiceNames(cfg)
+	normalizeDNSAddrsInConfig(cfg)
 	loadCfg := *cfg
 	loadCfg.Services = nil
 	if err := loader.Load(&loadCfg); err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	// loader.Load() calls corelogger.SetDefault() with a *logrusLogger.
-	// Attach our hook now so gost internal logs also appear in the app UI.
-	installLogrusHook()
+	// loader.Load() installs a fresh default logger via corelogger.SetDefault().
+	// Re-install ours now so gost internal logs also appear in the app UI.
+	installLogger()
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic in service startup: %v", r)
@@ -153,9 +155,32 @@ func Start(yamlConfig string) (err error) {
 	cancelFn = cancel
 	services = svcs
 	running = true
-	logrus.Infof("gost started: services=%d chains=%d hops=%d bypasses=%d",
+	log().Infof("gost started: services=%d chains=%d hops=%d bypasses=%d",
 		len(cfg.Services), len(cfg.Chains), len(cfg.Hops), len(cfg.Bypasses))
 	return nil
+}
+
+// normalizeDNSAddrsInConfig rewrites DNS service addresses from the IPv6
+// wildcard ("") to 0.0.0.0 so the listener binds to IPv4 instead of IPv6
+// dual-stack. Without this, "addr: :10053" becomes "[::]:10053" (IPv6 any),
+// and miekg/dns's WriteToSessionUDP sets Src=[::] via IPV6_PKTINFO in the
+// sendmsg control message, which fails when the destination is an IPv4
+// address (127.0.0.1:XXXXX) — the kernel cannot route from [::] to IPv4.
+// Users who need 127.0.0.1 can specify it explicitly in their YAML config.
+func normalizeDNSAddrsInConfig(cfg *config.Config) {
+	for _, svc := range cfg.Services {
+		if svc == nil || svc.Handler == nil || svc.Handler.Type != "dns" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(svc.Addr)
+		if err != nil {
+			continue
+		}
+		if host == "" {
+			svc.Addr = net.JoinHostPort("0.0.0.0", port)
+			log().Infof("DNS service %q: addr normalized to %s", svc.Name, svc.Addr)
+		}
+	}
 }
 
 // normalizeDNSAddr replaces an empty or "0.0.0.0" host with "127.0.0.1" so
@@ -195,11 +220,13 @@ func StartGost(yamlConfig string, systemDNS string) (err error) {
 			buf := make([]byte, 4096)
 			n := runtime.Stack(buf, false)
 			err = fmt.Errorf("panic in StartGost: %v\n%s", r, buf[:n])
+			log().Errorf("StartGost: panic recovered: %v\n%s", r, buf[:n])
 		}
 	}()
 
 	cfg := &config.Config{}
 	if err := yaml.Unmarshal([]byte(yamlConfig), cfg); err != nil {
+		log().Errorf("StartGost: invalid YAML config: %v", err)
 		return fmt.Errorf("invalid YAML config: %w", err)
 	}
 
@@ -210,6 +237,7 @@ func StartGost(yamlConfig string, systemDNS string) (err error) {
 
 	chainName, filtered := extractTungoService(cfg)
 	if chainName == "" {
+		log().Error("StartGost: config must contain a tungo service for VPN mode")
 		return fmt.Errorf("config must contain a tungo service for VPN mode")
 	}
 
@@ -222,9 +250,14 @@ func StartGost(yamlConfig string, systemDNS string) (err error) {
 
 	b, err := yaml.Marshal(filtered)
 	if err != nil {
+		log().Errorf("StartGost: marshal filtered config: %v", err)
 		return err
 	}
-	return Start(string(b))
+	if err := Start(string(b)); err != nil {
+		log().Errorf("StartGost: start failed: %v", err)
+		return err
+	}
+	return nil
 }
 
 // extractTungoService scans cfg for a service whose handler type is "tungo",
@@ -421,7 +454,7 @@ func launchServices(ctx context.Context, svcs []service.Service) {
 			defer serveWg.Done()
 			defer func() {
 				if r := recover(); r != nil {
-					logrus.Errorf("panic in service goroutine: %v", r)
+					log().Errorf("panic in service goroutine: %v", r)
 				}
 			}()
 			_ = s.Serve()
@@ -438,17 +471,27 @@ func ensureServiceNames(cfg *config.Config) {
 }
 
 // SetMemoryLimit configures the Go runtime GC for mobile background use.
-// enabled=true: aggressive GC (GOGC=20) + 50 MB soft heap limit.
-// 30 MB was too small; 100 MB is too large and keeps the heap unnecessarily
-// bloated on mobile. 50 MB balances full-system proxy workloads against
-// memory pressure. During doze mode all connections are closed (see
-// PauseTun/WakeTun), so the heap shrinks naturally at night.
+// enabled=true: 100 MB soft heap cap + GOGC=50 (per AGENTS.md).
+//
+// Previously this was 50 MB + GOGC=20. That setting is far too aggressive for
+// a hysteria/QUIC VPN: the constant packet/stream allocations from a full
+// proxy workload (especially the post-connect DNS flood) push the heap against
+// the 50 MB soft cap, and GOGC=20 forces near-continuous GC. The resulting
+// GC pauses stall the QUIC read/write loops, so an *established* tunnel goes
+// silent and dies with "timeout: no recent network activity" — i.e. the
+// proxy connection drops right after connect instead of staying alive.
+//
+// During doze mode all connections are closed (see PauseTun/WakeTun), so the
+// heap shrinks naturally at night; the 100 MB cap is not a problem there.
+// If 100 MB proves too high on a low-RAM device, prefer raising GOGC back
+// toward 50 over dropping the cap below ~75 MB, since the cap (not GOGC) is
+// what triggers the QUIC-stalling GC thrash under load.
 // enabled=false: restore defaults so normal service mode is unaffected.
 // Call with enabled=true when VPN starts, false when it stops.
 func SetMemoryLimit(enabled bool) {
-	const limit = 50 * 1024 * 1024
+	const limit = 100 * 1024 * 1024
 	if enabled {
-		runtimeDebug.SetGCPercent(20)
+		runtimeDebug.SetGCPercent(50)
 		runtimeDebug.SetMemoryLimit(limit)
 	} else {
 		runtimeDebug.SetGCPercent(100)
@@ -471,13 +514,13 @@ func SetSocketProtector(p SocketProtector) {
 			sp := socketProtector
 			mu.Unlock()
 			if sp != nil && !sp.Protect(int64(fd)) {
-				logrus.Warnf("VpnService.protect() failed for fd %d", fd)
+				log().Warnf("VpnService.protect() failed for fd %d", fd)
 			}
 		})
-		logrus.Info("VPN socket protector registered")
+		log().Info("VPN socket protector registered")
 	} else {
 		xdialer.SetGlobalSocketControl(nil)
-		logrus.Info("VPN socket protector cleared")
+		log().Info("VPN socket protector cleared")
 	}
 }
 
@@ -510,7 +553,7 @@ func resolveSystemDNSInConfig(cfg *config.Config, servers []string) {
 	if len(servers) == 0 {
 		return
 	}
-	logrus.Infof("system DNS servers: %v", servers)
+	log().Infof("system DNS servers: %v", servers)
 	idx := 0
 	for _, svc := range cfg.Services {
 		if svc == nil || svc.Handler == nil || svc.Handler.Type != "dns" || svc.Forwarder == nil {
@@ -527,7 +570,7 @@ func resolveSystemDNSInConfig(cfg *config.Config, servers []string) {
 			} else {
 				node.Addr = "udp://" + ip + ":53"
 			}
-			logrus.Infof("DNS forwarder %q: system → %s", node.Name, node.Addr)
+			log().Infof("DNS forwarder %q: system → %s", node.Name, node.Addr)
 		}
 	}
 }

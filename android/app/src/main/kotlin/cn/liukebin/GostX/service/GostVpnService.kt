@@ -17,6 +17,10 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.system.Os
 import android.system.OsConstants
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.TimeZone
 import cn.liukebin.gostx.R
 import cn.liukebin.gostx.data.AppFilterMode
 import cn.liukebin.gostx.data.ConfigRepository
@@ -32,8 +36,13 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 internal fun shouldRestartVpnOnNetworkAvailable(
     status: VpnStatus,
@@ -98,6 +107,8 @@ class GostVpnService : VpnService() {
     private lateinit var configRepo: ConfigRepository
     private val reconnectInProgress = AtomicBoolean(false)
     private val startInProgress = AtomicBoolean(false)
+    private var healthCheckJob: Job? = null
+    private var healthCheckRetried = false
     // Timestamp (ms) of the last successful VPN connect. Suppresses onAvailable
     // restarts for RECONNECT_COOLDOWN_MS after each connect because Android fires
     // onAvailable for all existing non-VPN networks whenever VPN routing changes,
@@ -176,6 +187,11 @@ class GostVpnService : VpnService() {
             // startForeground already called synchronously in onStartCommand
 
             val yaml = configRepo.getActiveConfig()
+
+            // Go cannot read Android's timezone on its own (no $TZ, no
+            // /etc/localtime), so it would timestamp logs in UTC. Push the
+            // platform timezone first so Go and Kotlin log lines agree.
+            LibgostBridge.setTimezone(TimeZone.getDefault())
 
             val logLevel = configRepo.logLevel
             val logMaxBytes = configRepo.logMaxSizeKb.toLong() * 1024
@@ -291,6 +307,7 @@ class GostVpnService : VpnService() {
                 registerNetworkCallback()
                 saveLastRunState(true)
                 LibgostBridge.setMemoryLimit(true)
+                startHealthCheck()
             } catch (e: Exception) {
                 log("VPN post-start error: ${e.message}")
                 GlobalVpnState.setError(getString(R.string.vpn_error_post_start, e.message))
@@ -306,7 +323,12 @@ class GostVpnService : VpnService() {
     }
 
     private fun stopVpn(updatePersistentState: Boolean = true) {
-        if (updatePersistentState) GlobalVpnState.setStopping()
+        if (updatePersistentState) {
+            GlobalVpnState.setStopping()
+            healthCheckRetried = false
+        }
+        healthCheckJob?.cancel()
+        healthCheckJob = null
         unregisterNetworkCallback()
         // Close the ParcelFileDescriptor first: this immediately notifies Android's
         // ConnectivityService that the VPN session is ending, so the status-bar icon
@@ -480,6 +502,73 @@ class GostVpnService : VpnService() {
         networkCallback = null
     }
 
+    // region Health Check
+
+    /**
+     * Launches a coroutine that waits for the VPN to stabilise, then probes
+     * connectivity through it. If no traffic flows (e.g. because a prior crash
+     * left Android's VPN routing in a stale state where protect() silently
+     * fails), the VPN is automatically restarted once. If it still fails, an
+     * error is shown recommending the user reinstall the app.
+     */
+    private fun startHealthCheck() {
+        healthCheckJob?.cancel()
+        healthCheckJob = scope.launch {
+            delay(8_000L) // allow initial connections time to settle
+            if (!isActive) return@launch
+            if (GlobalVpnState.state.value.status != VpnStatus.CONNECTED) return@launch
+
+            val ok = performConnectivityProbe()
+            if (ok) {
+                log("[health] VPN connectivity OK")
+                return@launch
+            }
+
+            if (healthCheckRetried) {
+                log("[health] VPN still dead after restart — stale state suspected")
+                GlobalVpnState.setError(getString(R.string.vpn_error_stale_state))
+                stopVpn()
+                return@launch
+            }
+
+            log("[health] VPN appears dead, restarting…")
+            healthCheckRetried = true
+            healthCheckJob = null // prevent stopVpn from cancelling us
+            stopVpn(updatePersistentState = false)
+            delay(3_000L)
+            if (!isActive) return@launch
+            if (GlobalVpnState.state.value.status == VpnStatus.CONNECTING) {
+                startVpn()
+            }
+        }
+    }
+
+    /**
+     * Performs a lightweight connectivity probe through the VPN:
+     * 1. DNS resolution of www.baidu.com (goes through TUN → gost DNS → chain)
+     * 2. TCP connection to the resolved IP on port 80
+     * Both operations use standard Java APIs, so they traverse the VPN like
+     * any other app's traffic.
+     */
+    private suspend fun performConnectivityProbe(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val addr = withTimeout(5_000L) {
+                InetAddress.getByName("www.baidu.com")
+            }
+            withTimeout(5_000L) {
+                Socket().use { s ->
+                    s.connect(InetSocketAddress(addr, 80), 5_000)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            log("[health] probe failed: ${e.message}")
+            false
+        }
+    }
+
+    // endregion
+
     override fun onDestroy() {
         // Release all Go resources synchronously. When the service is destroyed
         // without going through stopVpn() (e.g. coroutine exception → stopSelf()),
@@ -578,6 +667,16 @@ internal object LibgostBridge {
 
     fun setLogLevel(level: String) {
         runCatching { invoke("setLogLevel", level) }
+    }
+
+    /**
+     * Pushes the platform timezone to Go, which otherwise defaults to UTC on
+     * Android. The raw offset is passed as a fallback for devices where Go
+     * cannot resolve the zone ID from the bundled tzdata.
+     */
+    fun setTimezone(tz: TimeZone) {
+        val offsetSeconds = tz.getOffset(System.currentTimeMillis()) / 1000
+        runCatching { invoke("setTimezone", tz.id, offsetSeconds.toLong()) }
     }
 
     fun pauseTun() = runCatching { invoke("pauseTun") }

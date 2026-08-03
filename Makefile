@@ -1,15 +1,23 @@
-.PHONY: all android android-release macos macos-release clean
+.PHONY: all android android-release macos macos-release clean build-libgost-aar build-libgost-xcframework
 
 all: android
 
-android: libgost/libgost.aar
+FORCE:
+
+build-libgost-aar: FORCE
+	cd libgost && $(MAKE) libgost.aar
+
+build-libgost-xcframework: FORCE
+	cd libgost && $(MAKE) macos-xcframework
+
+android: android/app/libs/libgost.aar
 	cd android && ./gradlew assembleDebug
 
-android-release: libgost/libgost.aar
+android-release: android/app/libs/libgost.aar
 	cd android && ./gradlew assembleRelease bundleRelease
 
 macos: macos/Frameworks/Libgost.xcframework
-	cd macos && xcodebuild -project GostX.xcodeproj -scheme GostX -configuration Release -derivedDataPath build ONLY_ACTIVE_ARCH=YES build
+	cd macos && xcodebuild -project GostX.xcodeproj -scheme GostX -configuration Release -derivedDataPath build ONLY_ACTIVE_ARCH=YES -allowProvisioningUpdates build
 
 # Developer ID distribution: signed, notarized DMG for direct sharing
 # Prerequisites:
@@ -46,18 +54,17 @@ macos-release: macos/Frameworks/Libgost.xcframework
 		echo "⚠️  Skipping notarization (set APPLE_ID, APPLE_PASSWORD, APPLE_TEAM to enable)"; \
 	fi
 
-libgost/libgost.aar:
-	cd libgost && $(MAKE) libgost.aar
+android/app/libs/libgost.aar: build-libgost-aar
+	cp libgost/libgost.aar $@
 
-macos/Frameworks/Libgost.xcframework:
-	cd libgost && $(MAKE) macos-xcframework
-	mkdir -p macos/Frameworks
-	rm -rf macos/Frameworks/Libgost.xcframework
-	cp -R libgost/Libgost.xcframework macos/Frameworks/Libgost.xcframework
-	@echo "Libgost.xcframework → macos/Frameworks/"
+macos/Frameworks/Libgost.xcframework: build-libgost-xcframework
+	mkdir -p $(@D)
+	rm -rf $@
+	cp -R libgost/Libgost.xcframework $@
 
 clean:
 	cd libgost && $(MAKE) clean
 	cd android && ./gradlew clean 2>/dev/null || true
+	rm -f android/app/libs/libgost.aar
 	rm -rf macos/Frameworks/Libgost.xcframework
 	rm -rf macos/build
