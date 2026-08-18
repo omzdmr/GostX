@@ -33,9 +33,9 @@ import (
 	_ "github.com/go-gost/x/connector/tcp"
 	_ "github.com/go-gost/x/dialer/grpc"
 	_ "github.com/go-gost/x/dialer/http2"
-	_ "github.com/go-gost/x/dialer/hysteria"
 	_ "github.com/go-gost/x/dialer/http2/h2"
 	_ "github.com/go-gost/x/dialer/http3"
+	_ "github.com/go-gost/x/dialer/hysteria"
 	_ "github.com/go-gost/x/dialer/mws"
 	_ "github.com/go-gost/x/dialer/obfs/http"
 	_ "github.com/go-gost/x/dialer/obfs/tls"
@@ -262,7 +262,9 @@ func StartGost(yamlConfig string, systemDNS string) (err error) {
 
 // extractTungoService scans cfg for a service whose handler type is "tungo",
 // removes it from the services list (we handle it via gVisor in StartTun),
-// and returns its chain name plus the filtered config.
+// and returns its chain name plus the filtered config. Direct-domain DNS is
+// handled by the configured dns service (policy DNS via fakeip-exclude), so no
+// separate client-side resolver wiring is needed here.
 func extractTungoService(cfg *config.Config) (chainName string, filtered *config.Config) {
 	filtered = new(config.Config)
 	*filtered = *cfg
@@ -277,6 +279,7 @@ func extractTungoService(cfg *config.Config) (chainName string, filtered *config
 		}
 		filtered.Services = append(filtered.Services, svc)
 	}
+
 	return chainName, filtered
 }
 

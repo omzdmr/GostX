@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	gostchain "github.com/go-gost/core/chain"
 	xchain "github.com/go-gost/x/chain"
 	"github.com/go-gost/x/registry"
+	gostresolver "github.com/go-gost/x/resolver"
 )
 
 // trackableConn pairs a TUN-side connection with its upstream proxy connection.
@@ -136,9 +138,10 @@ func startVPNSingTun(fd, mtu int, chainName, dnsServiceAddr string) error {
 	} else {
 		log().Infof("no chain name – stack will route directly (fd=%d mtu=%d type=%s)", fd, mtu, tunStackType)
 	}
-	router := xchain.NewRouter(
+	routerOpts := []gostchain.RouterOption{
 		gostchain.ChainRouterOption(chainer),
-	)
+	}
+	router := xchain.NewRouter(routerOpts...)
 
 	prefix, err := netip.ParsePrefix(tunVPNPrefix)
 	if err != nil {
@@ -285,6 +288,28 @@ func (h *singTunHandler) closeTracked() {
 // is misconfigured, keeping the VPN service alive for graceful shutdown.
 const maxActiveTCPConns = 2000
 
+// dialTarget returns (address, host) for routing destination. address is always
+// the actual connection target; host is the domain recovered from the fakeip
+// store or DNS reverse map (used only for bypass matching) or "" when unknown.
+//
+// When destination is a fake IP with a known mapping, address becomes the
+// domain:port instead: the fake IP is not routable outside the proxy, so the
+// upstream (proxy or direct resolver) must resolve the real address from the
+// domain. The recovered domain is also returned as host for bypass matching.
+func (h *singTunHandler) dialTarget(destination M.Socksaddr) (addr, host string) {
+	port := strconv.Itoa(int(destination.Port))
+	if gostresolver.FakeIPContains(destination.Addr) {
+		if domain, ok := gostresolver.FakeIPLookup(destination.Addr); ok && domain != "" {
+			addr = net.JoinHostPort(domain, port)
+			return addr, addr
+		}
+		// Inside the fake range but unmapped (rare): fall through and dial the
+		// raw address rather than dropping the connection.
+	}
+	addr = net.JoinHostPort(destination.Addr.String(), port)
+	return addr, host
+}
+
 // PrepareConnection is a pre-flight hook called before each new session.
 // Returning nil allows the connection; returning ErrDrop silently drops it.
 func (h *singTunHandler) PrepareConnection(network string, source, destination M.Socksaddr) error {
@@ -304,7 +329,7 @@ func (h *singTunHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 		}()
 		defer func() {
 			if r := recover(); r != nil {
-				log().Errorf("[tcp] panic: %v", r)
+				log().Errorf("[tcp] panic: %v\n%s", r, debug.Stack())
 			}
 		}()
 
@@ -321,8 +346,18 @@ func (h *singTunHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 			return
 		}
 
-		dst := net.JoinHostPort(destination.Addr.String(), strconv.Itoa(int(destination.Port)))
 		atomic.AddInt64(&tcpConns, 1)
+
+		// IPv4-only VPN: drop IPv6 instead of routing it through the chain,
+		// where the local bypass (::/0) would mark it direct and the physical
+		// NIC — which has no IPv6 egress — returns "host unreachable". macOS
+		// may still deliver IPv6 into the tunnel despite IPv4-only settings,
+		// so this is the reliable guard. Apps fall back to IPv4 via
+		// happy-eyeballs.
+		if destination.Addr.Is6() {
+			log().Debugf("[tcp] drop IPv6 %v (IPv4-only VPN)", destination)
+			return
+		}
 
 		var upstream net.Conn
 		var err error
@@ -331,9 +366,37 @@ func (h *singTunHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 			int(destination.Port) == vpnDNSVirtualPort {
 			upstream, err = net.Dial("tcp", h.dnsServiceAddr)
 		} else {
-			upstream, err = h.router.Dial(ctx, "tcp", dst)
+			addr, host := h.dialTarget(destination)
+			// Sniffing fallback: when neither fakeip nor the DNS reverse map
+			// recovered a domain (e.g. the app resolved via its own DoH, or
+			// the mapping expired), recover it from the connection itself
+			// (TLS SNI / HTTP Host) so bypass rules can still match by domain.
+			// Every byte consumed by the sniff is spliced back into conn.
+			if host == "" {
+				// Sniffing fallback: when neither fakeip nor the DNS reverse map
+				// recovered a domain (e.g. the app resolved via its own DoH, or
+				// the mapping expired), recover it from the connection itself
+				// (TLS SNI / HTTP Host) so bypass rules can still match by domain.
+				var d string
+				d, conn = h.sniffConn(conn)
+				if d != "" {
+					host = net.JoinHostPort(d, strconv.Itoa(int(destination.Port)))
+					log().Debugf("[tcp-route] sniff: %v -> SNI %q", destination, d)
+				}
+			}
+			// Route via the Router, which applies the upstream chain bypass
+			// internally on BOTH addr (the actual dial target: the hostname for
+			// proxy domains, the real IP for direct) and host (the recovered or
+			// sniffed domain). No resolver is attached to the Router, so
+			// xnet.Resolve returns hostnames unchanged and proxy domains are
+			// resolved server-side; direct destinations already arrive as real
+			// IPs and need no client-side DNS. The previous isProxyRoute
+			// pre-check was redundant: the Router is built from the same chainer
+			// (ChainRouterOption), so it reaches the identical decision.
+			upstream, err = h.router.DialWithHost(ctx, "tcp", addr, host)
 		}
 		if err != nil {
+			log().Warnf("[tcp] dial %v->%v failed: %v", source, destination, err)
 			atomic.AddInt64(&failedConns, 1)
 			return
 		}
@@ -356,12 +419,18 @@ func (h *singTunHandler) NewPacketConnectionEx(ctx context.Context, conn N.Packe
 		}()
 		defer func() {
 			if r := recover(); r != nil {
-				log().Errorf("[udp] panic: %v", r)
+				log().Errorf("[udp] panic: %v\n%s", r, debug.Stack())
 			}
 		}()
 
-		dst := net.JoinHostPort(destination.Addr.String(), strconv.Itoa(int(destination.Port)))
 		atomic.AddInt64(&udpConns, 1)
+
+		// IPv4-only VPN: same as TCP — drop IPv6 rather than letting it hit
+		// the chain bypass and fail with EHOSTUNREACH on the physical NIC.
+		if destination.Addr.Is6() {
+			log().Debugf("[udp] drop IPv6 %v (IPv4-only VPN)", destination)
+			return
+		}
 
 		var upstream net.Conn
 		var err error
@@ -370,9 +439,12 @@ func (h *singTunHandler) NewPacketConnectionEx(ctx context.Context, conn N.Packe
 			int(destination.Port) == vpnDNSVirtualPort {
 			upstream, err = net.Dial("udp", h.dnsServiceAddr)
 		} else {
-			upstream, err = h.router.Dial(ctx, "udp", dst)
+			addr, host := h.dialTarget(destination)
+			// Same as TCP: the Router applies the chain bypass on addr and host.
+			upstream, err = h.router.DialWithHost(ctx, "udp", addr, host)
 		}
 		if err != nil {
+			log().Warnf("[udp] dial %v->%v failed: %v", source, destination, err)
 			atomic.AddInt64(&failedConns, 1)
 			return
 		}
@@ -406,25 +478,36 @@ func relayPacketConn(tc *trackableConn, src N.PacketConn, dst net.Conn, remoteAd
 
 	// TUN → upstream proxy
 	go func() {
-		defer func() { done <- struct{}{} }()
+		defer func() {
+			if r := recover(); r != nil {
+				log().Errorf("[udp-relay] panic: %v\n%s", r, debug.Stack())
+			}
+			closeWrite(dst)
+			tc.Close()
+			done <- struct{}{}
+		}()
 		buf := singbuf.NewSize(65535)
 		defer buf.Release()
 		for {
 			buf.Reset()
 			if _, err := src.ReadPacket(buf); err != nil {
-				break
+				return
 			}
 			if _, err := dst.Write(buf.Bytes()); err != nil {
-				break
+				return
 			}
 		}
-		closeWrite(dst)
-		tc.Close()
 	}()
 
 	// upstream proxy → TUN
 	go func() {
-		defer func() { done <- struct{}{} }()
+		defer func() {
+			if r := recover(); r != nil {
+				log().Errorf("[udp-relay] panic: %v\n%s", r, debug.Stack())
+			}
+			tc.Close()
+			done <- struct{}{}
+		}()
 		data := singbuf.Get(udpUpstreamReadBufferSize)
 		defer singbuf.Put(data)
 		for {
@@ -435,14 +518,13 @@ func relayPacketConn(tc *trackableConn, src N.PacketConn, dst net.Conn, remoteAd
 				// WritePacket takes ownership of pkt; do not Release on success.
 				if werr := src.WritePacket(pkt, remoteAddr); werr != nil {
 					pkt.Release()
-					break
+					return
 				}
 			}
 			if err != nil {
-				break
+				return
 			}
 		}
-		tc.Close()
 	}()
 
 	<-done
@@ -468,20 +550,30 @@ const tcpRelayBufferSize = 32 * 1024
 func relay(tc *trackableConn, src, dst net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log().Errorf("[relay] panic: %v\n%s", r, debug.Stack())
+			}
+			tc.Close()
+			done <- struct{}{}
+		}()
 		buf := singbuf.Get(tcpRelayBufferSize)
 		defer singbuf.Put(buf)
 		io.CopyBuffer(dst, src, buf)
 		closeWrite(dst)
-		tc.Close()
-		done <- struct{}{}
 	}()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log().Errorf("[relay] panic: %v\n%s", r, debug.Stack())
+			}
+			tc.Close()
+			done <- struct{}{}
+		}()
 		buf := singbuf.Get(tcpRelayBufferSize)
 		defer singbuf.Put(buf)
 		io.CopyBuffer(src, dst, buf)
 		closeWrite(src)
-		tc.Close()
-		done <- struct{}{}
 	}()
 	<-done
 	<-done

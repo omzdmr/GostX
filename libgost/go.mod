@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/go-gost/core v0.6.0
+	github.com/go-gost/tls-dissector v0.3.1
 	github.com/go-gost/x v0.4.2
 	github.com/sagernet/sing v0.6.0-beta.2
 	github.com/sagernet/sing-tun v0.6.1
@@ -28,8 +29,8 @@ require (
 	github.com/go-gost/gosocks4 v0.1.0 // indirect
 	github.com/go-gost/gosocks5 v0.5.0 // indirect
 	github.com/go-gost/plugin v0.5.0 // indirect
+	github.com/go-gost/quic-dissector v0.1.0 // indirect
 	github.com/go-gost/relay v0.7.0 // indirect
-	github.com/go-gost/tls-dissector v0.3.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-redis/redis/v8 v8.11.5 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
@@ -118,4 +119,4 @@ require (
 
 tool golang.org/x/mobile/cmd/gobind
 
-replace github.com/go-gost/x => github.com/lkebin/go-gost-x v0.0.0-20260731072132-48756e0a1456
+replace github.com/go-gost/x => github.com/lkebin/go-gost-x v0.0.0-20260815140125-905d29ebbbc4
