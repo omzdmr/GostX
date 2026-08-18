@@ -137,6 +137,9 @@ var logDrainErr error
 var logDrainRunning atomic.Bool      // true while drainLogFile is running
 var logDrainCancel context.CancelFunc // non-nil while drain goroutine is running; for test cleanup
 
+var metricsOnce sync.Once
+var metricsCancel context.CancelFunc
+
 // SetLogFile writes log messages to the given file path.
 // Opens with O_APPEND; call once on app startup.
 func SetLogFile(path string) error {
@@ -150,6 +153,12 @@ func SetLogFile(path string) error {
 		logDrainCancel = cancel
 		logDrainRunning.Store(true)
 		go drainLogFile(ctx, f)
+
+		metricsOnce.Do(func() {
+			metricsCtx, metricsCancelFn := context.WithCancel(ctx)
+			metricsCancel = metricsCancelFn
+			go startMetricsReporter(metricsCtx)
+		})
 	})
 	return logDrainErr
 }
@@ -221,6 +230,23 @@ func rotateLargeFile(f *os.File, maxBytes int64) {
 		return
 	}
 	f.Write(payload) //nolint:errcheck
+}
+
+// startMetricsReporter periodically logs goroutine count and heap memory usage.
+func startMetricsReporter(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			heapMB := m.HeapInuse / 1024 / 1024
+			log().Infof("[METRICS] goroutines=%d heap=%dMB", runtime.NumGoroutine(), heapMB)
+		}
+	}
 }
 
 // GetVPNLog drains all pending log messages and returns them newline-separated.
@@ -321,6 +347,12 @@ drain:
 	}
 	logDrainOnce = sync.Once{}
 	logDrainErr = nil
+
+	if metricsCancel != nil {
+		metricsCancel()
+		metricsCancel = nil
+	}
+	metricsOnce = sync.Once{}
 }
 
 // drainStaleLogs drains any log messages left in logCh from a previous session

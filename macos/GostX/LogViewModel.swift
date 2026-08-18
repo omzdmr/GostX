@@ -4,14 +4,16 @@ import SwiftUI
 // MARK: - Constants
 
 private let chunkLines = 1000   // lines to load on initial display and per history chunk
+private let maxLines = 10000  // maximum in-memory lines; bounded for memory safety
 
 @MainActor
 class LogViewModel: ObservableObject {
     @Published var lines: [String] = []
     @Published var isFollowing = false
 
-    private var timer: Timer?
+    private var fileMonitor: DispatchSourceFileSystemObject?
     private let logFileURL: URL?
+    private var lastOffset: Int64 = 0
     private var totalLineCount = 0      // number of lines in the file (used to detect new lines)
     private var loadedFromEnd = 0       // how many lines from the end are loaded
     private var hasEarlierHistory = true
@@ -23,19 +25,15 @@ class LogViewModel: ObservableObject {
     }
 
     func onAppear(loggingEnabled: Bool) {
-        readyForHistoryLoad = false
+        readyForHistoryLoad = true
         loadInitialTail()
         if loggingEnabled {
-            startPolling()
-        }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            readyForHistoryLoad = true
+            startMonitoring()
         }
     }
 
     func onDisappear() {
-        stopPolling()
+        stopMonitoring()
     }
 
     func copyAll() {
@@ -98,52 +96,113 @@ class LogViewModel: ObservableObject {
                 self.totalLineCount = allLines.count
                 self.loadedFromEnd = take
                 self.hasEarlierHistory = allLines.count > take
-            }
-        }
-    }
-
-    private func startPolling() {
-        guard let url = logFileURL else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task.detached(priority: .utility) { [weak self] in
-                guard let self else { return }
-                let allLines = readAllLines(from: url)
-                let prevCount = await MainActor.run { self.totalLineCount }
-                let prevLines = await MainActor.run { self.lines }
-                guard allLines.count != prevCount || allLines.isEmpty != prevLines.isEmpty else { return }
-
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    let newCount = allLines.count
-
-                    if newCount < self.loadedFromEnd {
-                        // File truncated or cleared
-                        self.lines = Array(allLines.suffix(min(newCount, chunkLines)))
-                        self.loadedFromEnd = min(newCount, chunkLines)
-                        self.hasEarlierHistory = newCount > self.loadedFromEnd
-                    } else if newCount > prevCount {
-                        // New lines appended
-                        let newLineCount = newCount - prevCount
-                        let newLines = Array(allLines.suffix(newLineCount))
-                        self.lines.append(contentsOf: newLines)
-                        self.loadedFromEnd += newLineCount
-                    } else if newCount < prevCount {
-                        // File may have been partially rewritten (rotate or external write)
-                        self.lines = Array(allLines.suffix(min(newCount, chunkLines)))
-                        self.loadedFromEnd = min(newCount, chunkLines)
-                        self.hasEarlierHistory = newCount > self.loadedFromEnd
+                if let url = self.logFileURL {
+                    let fd = open(url.path, O_RDONLY)
+                    if fd >= 0 {
+                        var stat = stat()
+                        if fstat(fd, &stat) == 0 {
+                            self.lastOffset = stat.st_size
+                        }
+                        close(fd)
                     }
-
-                    self.totalLineCount = newCount
                 }
             }
         }
     }
 
-    private func stopPolling() {
-        timer?.invalidate()
-        timer = nil
+    private func readNewData(fd: Int32) -> Bool {
+        var stat = stat()
+        guard fstat(fd, &stat) == 0 else { return false }
+        let size = stat.st_size
+
+        if size < lastOffset {
+            // File was truncated or cleared
+            lastOffset = 0
+            lseek(fd, 0, SEEK_SET)
+            var buf = [UInt8](repeating: 0, count: Int(size))
+            let n = read(fd, &buf, Int(size))
+            if n > 0, let content = String(bytes: buf[0..<n], encoding: .utf8) {
+                let allLines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+                let take = min(allLines.count, chunkLines)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.lines = Array(allLines.suffix(take))
+                    self.totalLineCount = allLines.count
+                    self.loadedFromEnd = take
+                    self.hasEarlierHistory = allLines.count > take
+                }
+            }
+            lastOffset = size
+            return false
+        }
+
+        if size == lastOffset { return false }
+
+        lseek(fd, lastOffset, SEEK_SET)
+        let bytesToRead = Int(size - lastOffset)
+        var buf = [UInt8](repeating: 0, count: bytesToRead)
+        let n = read(fd, &buf, bytesToRead)
+        guard n > 0 else { lastOffset = size; return false }
+
+        lastOffset = size
+
+        guard let content = String(bytes: buf[0..<n], encoding: .utf8) else { return false }
+        let newLines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+        guard !newLines.isEmpty else { return false }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lines.append(contentsOf: newLines)
+            self.totalLineCount += newLines.count
+            self.loadedFromEnd += newLines.count
+            self.trimToMax()
+        }
+
+        return true
+    }
+
+    private func startMonitoring() {
+        guard let url = logFileURL else { return }
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else { return }
+        lastOffset = lseek(fd, 0, SEEK_END)
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: .write,
+            queue: DispatchQueue.global(qos: .utility)
+        )
+
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            var hasData = true
+            while hasData {
+                hasData = self.readNewData(fd: fd)
+            }
+        }
+
+        source.setCancelHandler {
+            close(fd)
+        }
+
+        source.resume()
+        fileMonitor = source
+    }
+
+    private func stopMonitoring() {
+        fileMonitor?.cancel()
+        fileMonitor = nil
+        lastOffset = 0
+    }
+
+    /// Trims oldest lines when over `maxLines` so memory stays bounded
+    /// regardless of how the on-disk file is rotated.
+    private func trimToMax() {
+        let excess = lines.count - maxLines
+        guard excess > 0 else { return }
+        lines.removeFirst(excess)
+        loadedFromEnd = max(0, loadedFromEnd - excess)
+        hasEarlierHistory = loadedFromEnd < totalLineCount
     }
 }
 

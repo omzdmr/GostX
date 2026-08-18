@@ -82,7 +82,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func stop() {
         AppLogger.log(.info, "Stopping...")
         if vpnMode {
-            Task { @MainActor in VpnManager.shared.stop() }
+            MainActor.assumeIsolated { VpnManager.shared.stop() }
         } else {
             LibgostStopGost(nil)
         }
