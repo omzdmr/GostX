@@ -3,6 +3,7 @@ package cn.liukebin.gostx
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.platform.app.InstrumentationRegistry
 import cn.liukebin.gostx.data.ConfigRepository
@@ -13,25 +14,40 @@ import org.junit.Test
 class ConfigScreenTest {
     @get:Rule val rule = createComposeRule()
 
+    private fun context() = InstrumentationRegistry.getInstrumentation().targetContext
+
     private fun repo(): ConfigRepository {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val prefs = context.getSharedPreferences("config_screen_test", Context.MODE_PRIVATE)
+        val prefs = context().getSharedPreferences("config_screen_test", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
         return ConfigRepository(prefs)
     }
 
-    @Test fun showsYamlEditorWithDefaultContent() {
-        rule.setContent { ConfigScreen(repo = repo(), onBack = {}) }
+    private fun repoWithProfile(yaml: String = ""): Pair<ConfigRepository, String> {
+        val r = repo()
+        val id = r.addProfile("Test Profile")!!
+        r.saveConfig(id, yaml)
+        return r to id
+    }
+
+    @Test fun yamlEditorShowsSavedContent() {
+        val (repo, id) = repoWithProfile(yaml = "services:\n  - demo")
+        rule.setContent { ConfigScreen(repo = repo, profileId = id, onBack = {}) }
         rule.onNodeWithText("services:", substring = true).assertIsDisplayed()
     }
 
     @Test fun saveButtonIsVisible() {
-        rule.setContent { ConfigScreen(repo = repo(), onBack = {}) }
-        rule.onNodeWithText("保存").assertIsDisplayed()
+        val (repo, id) = repoWithProfile()
+        rule.setContent { ConfigScreen(repo = repo, profileId = id, onBack = {}) }
+        rule.onNodeWithContentDescription(
+            context().getString(R.string.action_save)
+        ).assertIsDisplayed()
     }
 
-    @Test fun validateButtonIsVisible() {
-        rule.setContent { ConfigScreen(repo = repo(), onBack = {}) }
-        rule.onNodeWithText("验证").assertIsDisplayed()
+    @Test fun renameButtonIsVisible() {
+        val (repo, id) = repoWithProfile()
+        rule.setContent { ConfigScreen(repo = repo, profileId = id, onBack = {}) }
+        rule.onNodeWithContentDescription(
+            context().getString(R.string.profile_rename)
+        ).assertIsDisplayed()
     }
 }
