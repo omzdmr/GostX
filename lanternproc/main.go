@@ -22,10 +22,7 @@ func main() {
 	}
 
 	client := lanternsdk.NewLanternClient()
-	if err := client.Setup("GostX", *configDir); err != nil {
-		fmt.Fprintf(os.Stderr, "lantern setup failed: %v\n", err)
-		os.Exit(3)
-	}
+	client.Setup("GostX", *configDir)
 
 	result, err := client.Start(*listen, *proxyAll)
 	if err != nil {
@@ -33,7 +30,7 @@ func main() {
 		os.Exit(4)
 	}
 
-	fmt.Printf("LANTERN_READY %v\n", result)
+	fmt.Printf("LANTERN_READY %s\n", result.Addr)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

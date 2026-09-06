@@ -1,0 +1,67 @@
+name: Lantern Isolated CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - lantern-isolated
+
+jobs:
+  lantern-core:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.4'
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Resolve Lantern modules
+        run: |
+          cd lanternproc
+          go mod download
+          go mod tidy
+          go list -deps . >/dev/null
+
+      - name: Build Lantern Android arm64 core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p out/arm64-v8a
+
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC="$TOOLCHAIN/aarch64-linux-android26-clang"
+          export CXX="$TOOLCHAIN/aarch64-linux-android26-clang++"
+          export CGO_ENABLED=1
+          export GOOS=android
+          export GOARCH=arm64
+          export CGO_LDFLAGS="-Wl,-z,max-page-size=16384"
+
+          cd lanternproc
+          go build \
+            -trimpath \
+            -buildmode=pie \
+            -ldflags="-s -w" \
+            -o ../out/arm64-v8a/lanternproc \
+            .
+
+          cd ..
+          file out/arm64-v8a/lanternproc
+          ls -lh out/arm64-v8a/lanternproc
+
+      - name: Upload Lantern core
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanternCore-arm64
+          path: out/arm64-v8a/lanternproc
+          if-no-files-found: error
