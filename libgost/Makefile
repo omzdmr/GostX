@@ -15,7 +15,7 @@ libgost.aar:
 	  -androidapi 26 \
 	  -trimpath -ldflags="-s -w" \
 	  -o libgost.aar \
-	  .
+	  . github.com/getlantern/lanternsdk-android/lantern
 
 # Build .aar with debug symbols for crash symbolication.
 # Produces debug-symbols.zip (for Google Play upload); libgost_debug.aar is a
@@ -26,7 +26,7 @@ debug-symbols:
 	  -androidapi 26 \
 	  -trimpath \
 	  -o libgost_debug.aar \
-	  .
+	  . github.com/getlantern/lanternsdk-android/lantern
 	@rm -rf _debug_tmp && mkdir -p _debug_tmp
 	@unzip -qo libgost_debug.aar -d _debug_tmp >/dev/null
 	@NDK_LLVM=$(NDK_LLVM); \

@@ -3,6 +3,7 @@ module libgost
 go 1.26.3
 
 require (
+	github.com/getlantern/lanternsdk-android v1.0.1
 	github.com/go-gost/core v0.6.0
 	github.com/go-gost/tls-dissector v0.3.1
 	github.com/go-gost/x v0.4.2
