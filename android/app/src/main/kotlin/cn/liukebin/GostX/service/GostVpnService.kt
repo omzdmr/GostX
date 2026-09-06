@@ -22,6 +22,8 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.TimeZone
 import cn.liukebin.gostx.R
+import cn.liukebin.gostx.anycast.AnycastAutoManager
+import cn.liukebin.gostx.anycast.AnycastConfigBuilder
 import cn.liukebin.gostx.data.AppFilterMode
 import cn.liukebin.gostx.data.ConfigRepository
 import cn.liukebin.gostx.data.GlobalVpnState
@@ -514,35 +516,56 @@ class GostVpnService : VpnService() {
     private fun startHealthCheck() {
         healthCheckJob?.cancel()
         healthCheckJob = scope.launch {
-            delay(8_000L) // allow initial connections time to settle
-            if (!isActive) return@launch
-            if (GlobalVpnState.state.value.status != VpnStatus.CONNECTED) return@launch
+            delay(8_000L)
+            while (isActive && GlobalVpnState.state.value.status == VpnStatus.CONNECTED) {
+                if (performConnectivityProbe()) {
+                    log("[health] VPN connectivity OK")
+                    delay(60_000L)
+                    continue
+                }
 
-            val ok = performConnectivityProbe()
-            if (ok) {
-                log("[health] VPN connectivity OK")
+                val isAnycast = configRepo.getActiveProfileId() == AnycastConfigBuilder.PROFILE_ID
+                if (isAnycast) {
+                    log("[health] Anycast connectivity failed; refreshing server/token...")
+                    val refreshed = runCatching {
+                        AnycastAutoManager(this@GostVpnService).refreshActiveProfile(configRepo)
+                    }.onFailure {
+                        log("[health] Anycast refresh failed: ${it.message}")
+                    }.isSuccess
+
+                    if (refreshed) {
+                        healthCheckJob = null
+                        stopVpn(updatePersistentState = false)
+                        delay(2_000L)
+                        if (isActive && GlobalVpnState.state.value.status == VpnStatus.CONNECTING) {
+                            startVpn()
+                        }
+                        return@launch
+                    }
+
+                    delay(30_000L)
+                    continue
+                }
+
+                if (healthCheckRetried) {
+                    log("[health] VPN still dead after restart - stale state suspected")
+                    GlobalVpnState.setError(getString(R.string.vpn_error_stale_state))
+                    stopVpn()
+                    return@launch
+                }
+
+                log("[health] VPN appears dead, restarting...")
+                healthCheckRetried = true
+                healthCheckJob = null
+                stopVpn(updatePersistentState = false)
+                delay(3_000L)
+                if (isActive && GlobalVpnState.state.value.status == VpnStatus.CONNECTING) {
+                    startVpn()
+                }
                 return@launch
-            }
-
-            if (healthCheckRetried) {
-                log("[health] VPN still dead after restart — stale state suspected")
-                GlobalVpnState.setError(getString(R.string.vpn_error_stale_state))
-                stopVpn()
-                return@launch
-            }
-
-            log("[health] VPN appears dead, restarting…")
-            healthCheckRetried = true
-            healthCheckJob = null // prevent stopVpn from cancelling us
-            stopVpn(updatePersistentState = false)
-            delay(3_000L)
-            if (!isActive) return@launch
-            if (GlobalVpnState.state.value.status == VpnStatus.CONNECTING) {
-                startVpn()
             }
         }
     }
-
     /**
      * Performs a lightweight connectivity probe through the VPN:
      * 1. DNS resolution of www.baidu.com (goes through TUN → gost DNS → chain)

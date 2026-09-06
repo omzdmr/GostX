@@ -152,6 +152,21 @@ class ConfigRepository(private val prefs: SharedPreferences) {
         }
     }
 
+    fun upsertProfile(id: String, name: String, yaml: String) {
+        val current = _profilesFlow.value
+        val exists = current.any { it.id == id }
+        val newList = if (exists) {
+            current.map { if (it.id == id) ConfigProfile(id, name) else it }
+        } else {
+            current + ConfigProfile(id, name)
+        }
+        prefs.edit()
+            .putString(KEY_PROFILES, newList.joinToString(",") { it.id })
+            .putString("config_profile_name_$id", name)
+            .putString("config_profile_$id", yaml)
+            .apply()
+        _profilesFlow.value = newList
+    }
     fun getNextDefaultName(): String {
         val existingNames = _profilesFlow.value.map { it.name }.toSet()
         var n = 1
