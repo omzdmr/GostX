@@ -55,6 +55,7 @@ fun AnycastScreen(
 
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var deviceId by remember { mutableStateOf(manager.savedDeviceUid().orEmpty()) }
     var nodes by remember { mutableStateOf<List<AnycastNode>>(emptyList()) }
     var selectedId by remember { mutableStateOf(manager.selectedNodeId()) }
     var busy by remember { mutableStateOf(false) }
@@ -102,6 +103,13 @@ fun AnycastScreen(
         ) {
             if (!manager.hasCredentials() || nodes.isEmpty()) {
                 OutlinedTextField(
+                    value = deviceId,
+                    onValueChange = { deviceId = it },
+                    label = { Text("Device ID") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                OutlinedTextField(
                     value = email,
                     onValueChange = { email = it },
                     label = { Text("Anycast email") },
@@ -118,9 +126,12 @@ fun AnycastScreen(
                 )
                 Button(
                     onClick = {
-                        if (email.isNotBlank() && password.isNotBlank()) {
+                        if (deviceId.isNotBlank() && email.isNotBlank() && password.isNotBlank()) {
+                            manager.saveDeviceUid(deviceId.trim())
                             manager.saveCredentials(email.trim(), password)
                             refresh(true)
+                        } else {
+                            status = "Device ID, email and password are required"
                         }
                     },
                     enabled = !busy,

@@ -62,7 +62,15 @@ class AnycastApiClient(
                     put("password", password)
                     put("code", JSONObject.NULL)
                 },
+                JSONObject().apply {
+                    put("platform", "windows-gui")
+                    put("deviceUid", deviceUid)
+                    put("email", email)
+                    put("password", password)
+                    put("code", "")
+                },
                 JSONObject().apply { put("email", email); put("password", password) },
+                JSONObject().apply { put("username", email); put("password", password) },
             )
             for (body in bodies) {
                 try {
@@ -76,10 +84,21 @@ class AnycastApiClient(
                             accountType = AnycastJson.str(AnycastJson.find(json, "account_type", "accountType")),
                         )
                     }
+                    val code = AnycastJson.str(AnycastJson.find(json, "code")).orEmpty()
+                    val message = AnycastJson.str(AnycastJson.find(json, "message", "msg", "error")).orEmpty()
+                    lastError = IllegalStateException(
+                        listOf("No access token", code, message)
+                            .filter { it.isNotBlank() }
+                            .joinToString(": ")
+                    )
                 } catch (t: Throwable) { lastError = t }
             }
         }
-        throw IllegalStateException("Anycast login failed", lastError)
+        val detail = lastError?.message?.take(500).orEmpty()
+        throw IllegalStateException(
+            if (detail.isBlank()) "Login failed" else "Login failed: $detail",
+            lastError
+        )
     }
 
     suspend fun listNodes(session: AnycastSession): List<AnycastNode> = withContext(Dispatchers.IO) {

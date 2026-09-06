@@ -13,6 +13,8 @@ class AnycastAutoManager(context: Context) {
     private var nodes: List<AnycastNode> = emptyList()
 
     fun hasCredentials(): Boolean = store.load() != null
+    fun savedDeviceUid(): String? = store.savedDeviceUid()
+    fun saveDeviceUid(value: String) = store.saveDeviceUid(value)
     fun saveCredentials(email: String, password: String) = store.save(email, password)
     fun clearCredentials() = store.clear()
     fun selectedNodeId(): String? = store.selectedNode()

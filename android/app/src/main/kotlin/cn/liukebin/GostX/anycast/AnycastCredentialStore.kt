@@ -17,10 +17,15 @@ class AnycastCredentialStore(context: Context) {
 
     data class Credentials(val email: String, val password: String)
 
-    fun deviceUid(): String {
-        val current = prefs.getString("device_uid", null)
-        if (!current.isNullOrBlank()) return current
-        return UUID.randomUUID().toString().also { prefs.edit().putString("device_uid", it).apply() }
+    fun savedDeviceUid(): String? =
+        prefs.getString("device_uid", null)?.trim()?.takeIf { it.isNotBlank() }
+
+    fun deviceUid(): String =
+        savedDeviceUid() ?: error("Device ID is not configured")
+
+    fun saveDeviceUid(value: String) {
+        require(value.isNotBlank()) { "Device ID cannot be empty" }
+        prefs.edit().putString("device_uid", value.trim()).apply()
     }
 
     fun save(email: String, password: String) {
