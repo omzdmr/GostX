@@ -14,6 +14,7 @@ import cn.liukebin.gostx.MainActivity
 import cn.liukebin.gostx.data.GlobalVpnState
 import cn.liukebin.gostx.data.VpnStatus
 import cn.liukebin.gostx.service.GostVpnService
+import cn.liukebin.gostx.service.LibgostBridge
 import java.io.File
 import java.net.Inet4Address
 import java.net.InetSocketAddress
@@ -58,7 +59,6 @@ class SecondaryProxyService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var healthJob: Job? = null
-    private var lanternClient: lantern.LanternClient? = null
     private var stoppingByUser = false
     private var startInProgress = false
 
@@ -110,12 +110,11 @@ class SecondaryProxyService : Service() {
             SecondaryProxyState.starting("Starting Lantern Free...")
             val configDir = File(filesDir, "secondary_proxy_config").apply { mkdirs() }
 
-            val client = lantern.LanternClient()
-            client.setup("GostX", configDir.absolutePath)
-
-            val result = client.start(":$LAN_PORT", true)
-            val returnedAddr = result.addr
-            lanternClient = client
+            val returnedAddr = LibgostBridge.startLantern(
+                configDir.absolutePath,
+                ":$LAN_PORT",
+                true
+            )
 
             getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
@@ -134,6 +133,7 @@ class SecondaryProxyService : Service() {
                 .edit()
                 .putBoolean(PREF_DESIRED, false)
                 .apply()
+            runCatching { LibgostBridge.stopLantern() }
             stopForegroundCompat()
             stopSelf()
         } finally {
@@ -166,6 +166,7 @@ class SecondaryProxyService : Service() {
         healthJob = scope.launch {
             delay(12_000L)
             var consecutiveFailures = 0
+
             while (isActive) {
                 if (probeThroughProxy()) {
                     consecutiveFailures = 0
@@ -182,15 +183,16 @@ class SecondaryProxyService : Service() {
                 }
 
                 SecondaryProxyState.reconnecting(shownAddress)
-                runCatching { lanternClient?.stop() }
+                LibgostBridge.stopLantern()
                 delay(2_000L)
 
                 val restarted = runCatching {
                     val configDir = File(filesDir, "secondary_proxy_config").apply { mkdirs() }
-                    val client = lantern.LanternClient()
-                    client.setup("GostX", configDir.absolutePath)
-                    client.start(":$LAN_PORT", true)
-                    lanternClient = client
+                    LibgostBridge.startLantern(
+                        configDir.absolutePath,
+                        ":$LAN_PORT",
+                        true
+                    )
                 }.isSuccess
 
                 if (restarted) {
@@ -233,8 +235,7 @@ class SecondaryProxyService : Service() {
     private suspend fun stopProxy(clearDesired: Boolean) {
         healthJob?.cancel()
         healthJob = null
-        runCatching { lanternClient?.stop() }
-        lanternClient = null
+        LibgostBridge.stopLantern()
 
         if (clearDesired) {
             getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -319,8 +320,7 @@ class SecondaryProxyService : Service() {
 
     override fun onDestroy() {
         healthJob?.cancel()
-        runCatching { lanternClient?.stop() }
-        lanternClient = null
+        LibgostBridge.stopLantern()
         if (stoppingByUser) {
             SecondaryProxyState.stopped()
         }
