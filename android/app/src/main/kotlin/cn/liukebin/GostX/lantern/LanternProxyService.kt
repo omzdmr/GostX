@@ -32,6 +32,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -256,6 +257,7 @@ class LanternProxyService : Service() {
             syncRecoverySettings()
 
             val ready = CompletableDeferred<Boolean>()
+            val lastCoreLine = AtomicReference<String>("")
             val builder = ProcessBuilder(
                 binary.absolutePath,
                 "--config-dir", configDir.absolutePath,
@@ -275,6 +277,7 @@ class LanternProxyService : Service() {
                     process.inputStream.bufferedReader().useLines { lines ->
                         lines.forEach { line ->
                             Log.i(TAG, line)
+                            lastCoreLine.set(line.takeLast(600))
                             if (line.startsWith("LANTERN_READY ")) {
                                 val actual = line.removePrefix("LANTERN_READY ").trim()
                                 val lanAddress = lanProxyAddress(actual)
@@ -296,10 +299,23 @@ class LanternProxyService : Service() {
                 if (lanternProcess === process) {
                     lanternProcess = null
                     if (desiredRunning && !recoveryInProgress.get()) {
-                        LanternProxyState.setError(
-                            "Lantern core exited ($exitCode). Retrying..."
+                        val coreDetail = lastCoreLine.get().trim()
+                        val exitMessage =
+                            if (coreDetail.isBlank()) {
+                                "Lantern core exited ($exitCode). Retrying..."
+                            } else {
+                                "Lantern core exited ($exitCode): " +
+                                    coreDetail.takeLast(240)
+                            }
+
+                        LanternProxyState.setError(exitMessage)
+                        promoteToForeground(
+                            if (coreDetail.isBlank()) {
+                                "Lantern exited. Retrying..."
+                            } else {
+                                "Lantern exited: ${coreDetail.takeLast(120)}"
+                            }
                         )
-                        promoteToForeground("Lantern exited. Retrying...")
                         delay(3_000)
                         if (desiredRunning && !recoveryInProgress.get()) {
                             startLantern()

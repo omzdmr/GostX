@@ -1,5 +1,8 @@
 package main
 
+// #cgo LDFLAGS: -static-libstdc++
+import "C"
+
 import (
 	"flag"
 	"fmt"
