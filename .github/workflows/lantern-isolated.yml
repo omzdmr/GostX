@@ -7,7 +7,7 @@ on:
       - lantern-isolated
 
 jobs:
-  lantern-core:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,10 +21,24 @@ jobs:
         with:
           go-version: '1.22.4'
 
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Setup NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26d
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
 
       - name: Resolve Lantern modules
         run: |
@@ -33,11 +47,13 @@ jobs:
           go mod tidy
           go list -deps . >/dev/null
 
-      - name: Build Lantern Android arm64 core
+      - name: Build and package Lantern arm64 core
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p out/arm64-v8a
+
+          DEST="android/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$DEST"
 
           TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CC="$TOOLCHAIN/aarch64-linux-android26-clang"
@@ -52,16 +68,27 @@ jobs:
             -trimpath \
             -buildmode=pie \
             -ldflags="-s -w" \
-            -o ../out/arm64-v8a/lanternproc \
+            -o "../$DEST/liblanternproc.so" \
             .
-
           cd ..
-          file out/arm64-v8a/lanternproc
-          ls -lh out/arm64-v8a/lanternproc
+
+          file "$DEST/liblanternproc.so"
+          readelf -h "$DEST/liblanternproc.so" | head -30
+          ls -lh "$DEST/liblanternproc.so"
+
+      - name: Build debug APK
+        run: make android
+
+      - name: Upload Lantern APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GostX-Lantern-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
 
       - name: Upload Lantern core
         uses: actions/upload-artifact@v4
         with:
           name: LanternCore-arm64
-          path: out/arm64-v8a/lanternproc
+          path: android/app/src/main/jniLibs/arm64-v8a/liblanternproc.so
           if-no-files-found: error

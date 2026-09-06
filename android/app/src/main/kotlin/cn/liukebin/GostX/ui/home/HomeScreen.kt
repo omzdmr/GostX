@@ -19,6 +19,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -73,6 +74,7 @@ fun HomeScreen(
     onNavigateToLogs: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onNavigateToAnycast: () -> Unit = {},
+    onNavigateToLantern: () -> Unit = {},
     onNavigateToConfigEdit: (profileId: String) -> Unit = {},
     vm: HomeViewModel = viewModel(
         factory = remember(repo) {
@@ -174,6 +176,10 @@ fun HomeScreen(
                     }
                     IconButton(onClick = onNavigateToAnycast) {
                         Icon(Icons.Filled.Public, contentDescription = "Anycast Auto")
+                    }
+                    
+                    IconButton(onClick = onNavigateToLantern) {
+                        Icon(Icons.Filled.FlashOn, contentDescription = "Lantern Free")
                     }
                     IconButton(onClick = { showAddDialog = true }) {
                         Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.profile_add))

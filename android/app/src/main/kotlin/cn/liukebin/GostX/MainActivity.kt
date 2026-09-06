@@ -32,6 +32,7 @@ import cn.liukebin.gostx.data.GlobalVpnState
 import cn.liukebin.gostx.ui.Screen
 import cn.liukebin.gostx.ui.config.ConfigScreen
 import cn.liukebin.gostx.ui.anycast.AnycastScreen
+import cn.liukebin.gostx.ui.lantern.LanternProxyScreen
 import cn.liukebin.gostx.ui.home.HomeScreen
 import cn.liukebin.gostx.ui.log.LogScreen
 import cn.liukebin.gostx.ui.settings.AppFilterScreen
@@ -101,6 +102,7 @@ fun GostXApp(
                         onNavigateToLogs = { navController.navigate(Screen.Logs.route) },
                         onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
                         onNavigateToAnycast = { navController.navigate(Screen.Anycast.route) },
+                        onNavigateToLantern = { navController.navigate(Screen.Lantern.route) },
                         onNavigateToConfigEdit = { profileId ->
                             navController.navigate(Screen.ConfigEdit.createRoute(profileId))
                         }
@@ -111,6 +113,11 @@ fun GostXApp(
                         repo = configRepository,
                         onBack = { navController.popBackStack() },
                         onRequestVpnPermission = onRequestVpnPermission,
+                    )
+                }
+                composable(Screen.Lantern.route) {
+                    LanternProxyScreen(
+                        onBack = { navController.popBackStack() }
                     )
                 }
                 composable(Screen.Logs.route) { LogScreen(onBack = { navController.popBackStack() }) }

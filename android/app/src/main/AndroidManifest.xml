@@ -48,6 +48,14 @@
         </service>
 
         <service
+            android:name=".lantern.LanternProxyService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="local HTTP proxy using Lantern" />
+        </service>
+        <service
             android:name=".tile.GostTileService"
             android:exported="true"
             android:icon="@drawable/ic_tile_vpn"
