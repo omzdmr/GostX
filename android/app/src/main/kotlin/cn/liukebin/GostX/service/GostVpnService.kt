@@ -678,17 +678,6 @@ internal object LibgostBridge {
         }
     }
 
-    fun startLantern(configDir: String, addr: String, proxyAll: Boolean): String =
-        invoke("startLantern", configDir, addr, proxyAll) as? String
-            ?: throw IllegalStateException("Lantern returned no proxy address")
-
-    fun stopLantern() {
-        runCatching { invoke("stopLantern") }
-    }
-
-    fun isLanternRunning(): Boolean =
-        runCatching { invoke("isLanternRunning") as? Boolean ?: false }
-            .getOrDefault(false)
     fun setWorkDir(path: String): Result<Unit> =
         runCatching { invoke("setWorkDir", path); Unit }
 

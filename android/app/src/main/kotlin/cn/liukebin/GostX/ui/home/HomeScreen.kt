@@ -17,7 +17,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.Card
@@ -74,7 +73,6 @@ fun HomeScreen(
     onNavigateToLogs: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onNavigateToAnycast: () -> Unit = {},
-    onNavigateToSecondaryProxy: () -> Unit = {},
     onNavigateToConfigEdit: (profileId: String) -> Unit = {},
     vm: HomeViewModel = viewModel(
         factory = remember(repo) {
@@ -176,9 +174,6 @@ fun HomeScreen(
                     }
                     IconButton(onClick = onNavigateToAnycast) {
                         Icon(Icons.Filled.Public, contentDescription = "Anycast Auto")
-                    }
-                                        IconButton(onClick = onNavigateToSecondaryProxy) {
-                        Icon(Icons.Filled.Bolt, contentDescription = "Lantern Free")
                     }
                     IconButton(onClick = { showAddDialog = true }) {
                         Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.profile_add))

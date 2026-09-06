@@ -3,7 +3,6 @@ module libgost
 go 1.26.3
 
 require (
-	github.com/getlantern/lanternsdk-android v1.0.1
 	github.com/go-gost/core v0.6.0
 	github.com/go-gost/tls-dissector v0.3.1
 	github.com/go-gost/x v0.4.2
@@ -121,5 +120,3 @@ require (
 tool golang.org/x/mobile/cmd/gobind
 
 replace github.com/go-gost/x => github.com/lkebin/go-gost-x v0.0.0-20260815140125-905d29ebbbc4
-
-replace github.com/tetratelabs/wazero => github.com/refraction-networking/wazero v1.7.1-w

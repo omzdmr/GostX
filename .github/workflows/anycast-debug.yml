@@ -1,4 +1,4 @@
-name: Android Debug APK
+name: Anycast Auto Debug APK
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.22'
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -36,17 +36,8 @@ jobs:
 
       - name: Install gomobile
         run: |
-          MOBILE_VER=v0.0.0-20260520154334-0e4426e1883d
-          go install golang.org/x/mobile/cmd/gomobile@$MOBILE_VER
-          go install golang.org/x/mobile/cmd/gobind@$MOBILE_VER
+          go install golang.org/x/mobile/cmd/gomobile@latest
           gomobile init
-
-      - name: Prepare Go modules
-        run: |
-          cd libgost
-          go mod download
-          go mod tidy
-          GOOS=android GOARCH=arm64 CGO_ENABLED=1 go list -deps . >/dev/null
 
       - name: Build debug APK
         run: make android
@@ -54,6 +45,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: GostX-debug
+          name: AnycastAuto-GostX-debug
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error

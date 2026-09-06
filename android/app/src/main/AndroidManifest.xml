@@ -46,15 +46,6 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="vpn" />
         </service>
-        <service
-            android:name=".secondary.SecondaryProxyService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="user initiated LAN proxy" />
-        </service>
-
 
         <service
             android:name=".tile.GostTileService"

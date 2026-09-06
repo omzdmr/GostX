@@ -4,7 +4,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import cn.liukebin.gostx.service.GostVpnService
-import cn.liukebin.gostx.secondary.SecondaryProxyService
 import cn.liukebin.gostx.anycast.AnycastAutoManager
 import cn.liukebin.gostx.anycast.AnycastConfigBuilder
 import cn.liukebin.gostx.data.ConfigRepository
@@ -16,14 +15,9 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
 
-        val prefs = context.getSharedPreferences("gostx_prefs", Context.MODE_PRIVATE)
-        val secondaryWasRunning = prefs.getBoolean("secondary_proxy_running", false)
-        val wasRunning = prefs.getBoolean("last_vpn_running", false)
-
-        if (secondaryWasRunning) {
-            SecondaryProxyService.start(context)
-            return
-        }
+        val wasRunning = context
+            .getSharedPreferences("gostx_prefs", Context.MODE_PRIVATE)
+            .getBoolean("last_vpn_running", false)
 
         if (wasRunning) {
             val pending = goAsync()
