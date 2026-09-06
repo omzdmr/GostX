@@ -174,7 +174,8 @@ fun HomeScreen(
                     }
                     IconButton(onClick = onNavigateToAnycast) {
                         Icon(Icons.Filled.Public, contentDescription = "Anycast Auto")
-                    }                    IconButton(onClick = { showAddDialog = true }) {
+                    }
+                    IconButton(onClick = { showAddDialog = true }) {
                         Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.profile_add))
                     }
                     IconButton(onClick = onNavigateToSettings) {

@@ -112,7 +112,8 @@ fun GostXApp(
                         onBack = { navController.popBackStack() },
                         onRequestVpnPermission = onRequestVpnPermission,
                     )
-                }                composable(Screen.Logs.route) { LogScreen(onBack = { navController.popBackStack() }) }
+                }
+                composable(Screen.Logs.route) { LogScreen(onBack = { navController.popBackStack() }) }
                 composable(Screen.Settings.route) {
                     SettingsScreen(
                         repo = configRepository,

@@ -28,7 +28,10 @@ class AnycastApiClient(
     }
 
     private val client = OkHttpClient.Builder()
-        .dns(Dns { host -> AnycastDns.resolve(host) })
+        .dns(object : Dns {
+            override fun lookup(hostname: String): List<java.net.InetAddress> =
+                AnycastDns.resolve(hostname)
+        })
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
