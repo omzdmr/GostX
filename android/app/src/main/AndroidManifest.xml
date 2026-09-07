@@ -53,8 +53,18 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="local HTTP proxy using Lantern" />
+                android:value="local HTTP proxy using Lantern legacy core" />
         </service>
+
+        <service
+            android:name=".lantern.LanternRadianceService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="local HTTP proxy using Lantern Radiance" />
+        </service>
+
         <service
             android:name=".tile.GostTileService"
             android:exported="true"
