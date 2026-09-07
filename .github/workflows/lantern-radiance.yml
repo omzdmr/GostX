@@ -39,41 +39,33 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
-      - name: Setup current Go toolchain
+      - name: Setup Go 1.26.3
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.2'
+          go-version: '1.26.3'
           cache: false
 
-      - name: Fetch pinned official Lantern core
+      - name: Build official Lantern Radiance novpn process
         shell: bash
         run: |
           set -euxo pipefail
-          git clone --filter=blob:none https://github.com/getlantern/lantern.git lantern-current
-          cd lantern-current
-          git checkout 64b959841223f913a5fea5f5c45d66a1199db863
-          git rev-parse HEAD
+          DEST="android/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$DEST"
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC="$TOOLCHAIN/aarch64-linux-android26-clang"
+          export CXX="$TOOLCHAIN/aarch64-linux-android26-clang++"
+          export CGO_ENABLED=1
+          export GOOS=android
+          export GOARCH=arm64
+          export CGO_LDFLAGS="-Wl,-z,max-page-size=16384"
+          cd radianceproc
+          go mod tidy
+          go mod download
+          go build -mod=mod -tags "novpn,with_gvisor,with_quic,with_wireguard,with_utls,with_grpc" -trimpath -buildmode=pie -ldflags="-s -w -checklinkname=0 -X github.com/getlantern/radiance/common.Version=9.0.29" -o "../$DEST/libradianceproc.so" .
+          cd ..
+          file "$DEST/libradianceproc.so"
 
-      - name: Build official Lantern Radiance AAR
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd lantern-current
-          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}"
-          export ANDROID_HOME="${ANDROID_SDK_ROOT}"
-          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME}"
-          export PATH="$HOME/go/bin:$PATH"
-          make install-gomobile
-          make build-android \
-            ANDROID_NDK_VERSION=28.2.13676358 \
-            GOMOBILE_ANDROID_TARGET=android/arm64 \
-            APP_VERSION=9.0.29
-          test -s bin/android/liblantern.aar
-          cp bin/android/liblantern.aar ../android/app/libs/liblantern.aar
-          ls -lh ../android/app/libs/liblantern.aar
-          unzip -l ../android/app/libs/liblantern.aar | head -80
-
-      - name: Switch to Go 1.22 for legacy Flashlight fallback
+      - name: Setup Go 1.22 for legacy Flashlight fallback
         uses: actions/setup-go@v5
         with:
           go-version: '1.22.4'
@@ -93,18 +85,12 @@ jobs:
           export GOARCH=arm64
           export CGO_LDFLAGS="-Wl,-z,max-page-size=16384"
           cd lanternproc
-          # This branch did not carry a go.sum. Let Go resolve the exact
-          # transitive checksums before the Android cross-build instead of
-          # failing on missing Flashlight module sum entries.
           go mod tidy
           go mod download
           go build -mod=mod -trimpath -buildmode=pie -ldflags="-s -w" -o "../$DEST/liblanternproc.so" .
           cd ..
           file "$DEST/liblanternproc.so"
 
-      # libgost/go.mod requires Go 1.26.3. The legacy fallback step above
-      # intentionally switches to Go 1.22, so restore the modern toolchain
-      # before make android invokes gomobile for libgost.
       - name: Restore Go 1.26.3 for GostX
         uses: actions/setup-go@v5
         with:
@@ -115,24 +101,25 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          go version
           go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$HOME/go/bin:$PATH"
           gomobile init
+
+      - name: Ensure old Lantern AAR is not packaged
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -f android/app/libs/liblantern.aar
 
       - name: Build GostX Radiance debug APK
         shell: bash
         run: |
-          set +e
+          set -euxo pipefail
           make android 2>&1 | tee gostx-android-build.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            echo "===== GostX build failure tail ====="
-            tail -n 220 gostx-android-build.log
-          fi
-          exit "$status"
 
       - name: Upload GostX build diagnostics
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: gostx-android-build-log
@@ -145,23 +132,14 @@ jobs:
         run: |
           set -euxo pipefail
           APK=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -1)
-          cp "$APK" GostX-Lantern-Radiance-v1.apk
-          sha256sum GostX-Lantern-Radiance-v1.apk
-          ls -lh GostX-Lantern-Radiance-v1.apk
+          cp "$APK" GostX-Lantern-Radiance-v2.apk
+          sha256sum GostX-Lantern-Radiance-v2.apk
+          ls -lh GostX-Lantern-Radiance-v2.apk
 
       - name: Upload Radiance APK
         uses: actions/upload-artifact@v4
         with:
-          name: GostX-Lantern-Radiance-v1
-          path: GostX-Lantern-Radiance-v1.apk
+          name: GostX-Lantern-Radiance-v2
+          path: GostX-Lantern-Radiance-v2.apk
           if-no-files-found: error
           retention-days: 30
-
-      - name: Upload official Lantern AAR for diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: liblantern-radiance-aar
-          path: android/app/libs/liblantern.aar
-          if-no-files-found: warn
-          retention-days: 7

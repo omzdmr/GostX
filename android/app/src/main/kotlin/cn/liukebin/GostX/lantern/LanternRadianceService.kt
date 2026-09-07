@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import android.system.Os
 import androidx.core.app.NotificationCompat
 import cn.liukebin.gostx.MainActivity
 import cn.liukebin.gostx.R
@@ -19,16 +18,15 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import lantern.io.mobile.Mobile
-import lantern.io.utils.FlutterEvent
-import lantern.io.utils.FlutterEventEmitter
-import lantern.io.utils.Opts
 
 /**
  * Current Lantern/Radiance backend for GostX.
  *
- * Radiance runs in local SOCKS mode on 127.0.0.1:18080. A small bridge exposes
- * that as an ordinary LAN HTTP proxy on 0.0.0.0:8080 for TVs and other devices.
+ * Radiance runs as a separate native novpn process. This is intentional: the
+ * app already embeds libgost.aar, and two gomobile AARs would ship two copies
+ * of go.Seq/libgojni and collide. A native process gives each Go runtime its
+ * own address space and is also much easier to restart cleanly after identity
+ * rotation or a stuck Smart Location attempt.
  */
 class LanternRadianceService : Service() {
     companion object {
@@ -36,14 +34,11 @@ class LanternRadianceService : Service() {
         private const val ACTION_STOP = "cn.liukebin.gostx.lantern.RADIANCE_STOP"
         private const val CHANNEL_ID = "gostx_radiance"
         private const val NOTIFICATION_ID = 38081
-        private const val SOCKS_HOST = "127.0.0.1"
-        private const val SOCKS_PORT = 18080
         private const val LAN_PORT = 8080
         private const val PREFS = "radiance_proxy"
         private const val PREF_DEVICE_ID = "device_id"
 
         fun start(context: Context) {
-            // Port 8080 belongs to one backend at a time. Stop legacy first.
             context.stopService(Intent(context, LanternProxyService::class.java))
             val intent = Intent(context, LanternRadianceService::class.java).setAction(ACTION_START)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -54,14 +49,13 @@ class LanternRadianceService : Service() {
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, LanternRadianceService::class.java).setAction(ACTION_STOP)
-            context.startService(intent)
+            context.startService(Intent(context, LanternRadianceService::class.java).setAction(ACTION_STOP))
         }
     }
 
     private val executor = Executors.newSingleThreadExecutor()
     private val stopping = AtomicBoolean(false)
-    @Volatile private var lanProxy: LanHttpToSocksProxy? = null
+    @Volatile private var radianceProcess: Process? = null
     @Volatile private var startedAt = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -76,10 +70,7 @@ class LanternRadianceService : Service() {
             ACTION_STOP -> executor.execute { stopBackend() }
             ACTION_START, null -> {
                 startForeground(NOTIFICATION_ID, notification("Radiance hazırlanıyor"))
-                if (RadianceProxyState.state.value.status != RadianceStatus.STARTING &&
-                    RadianceProxyState.state.value.status != RadianceStatus.RUNNING) {
-                    executor.execute { startBackend() }
-                }
+                if (radianceProcess?.isAlive != true) executor.execute { startBackend() }
             }
         }
         return START_STICKY
@@ -87,13 +78,7 @@ class LanternRadianceService : Service() {
 
     override fun onDestroy() {
         stopping.set(true)
-        runCatching { lanProxy?.stop() }
-        lanProxy = null
-        executor.execute {
-            runCatching {
-                if (Mobile.isRadianceConnected()) Mobile.stopVPN()
-            }
-        }
+        stopProcess()
         super.onDestroy()
     }
 
@@ -113,120 +98,100 @@ class LanternRadianceService : Service() {
         }
 
         try {
-            configureRadianceEnvironment()
+            val binary = File(applicationInfo.nativeLibraryDir, "libradianceproc.so")
+            check(binary.exists()) { "Radiance core is missing for this CPU" }
+            check(binary.canExecute()) { "Radiance core is not executable" }
+
             val dataDir = File(filesDir, "lantern-radiance").apply { mkdirs() }
             val logDir = File(dataDir, "logs").apply { mkdirs() }
-            val platform = RadiancePlatform(applicationContext)
-            val opts = Opts().apply {
-                this.dataDir = dataDir.absolutePath
-                this.logDir = logDir.absolutePath
-                this.logLevel = "debug"
-                this.deviceid = deviceId
-                this.locale = Locale.getDefault().language.ifBlank { "en" }
-                this.telemetryConsent = false
-                this.env = "prod"
-                this.platform = platform
-            }
-            val emitter = object : FlutterEventEmitter {
-                override fun sendEvent(p0: FlutterEvent?) {
-                    if (p0 == null) return
-                    RadianceProxyState.update { state ->
-                        state.copy(lastEvent = "${p0.type}: ${p0.message}")
+            val builder = ProcessBuilder(
+                binary.absolutePath,
+                "--data-dir", dataDir.absolutePath,
+                "--log-dir", logDir.absolutePath,
+                "--listen", "0.0.0.0:$LAN_PORT",
+                "--device-id", deviceId,
+                "--locale", Locale.getDefault().language.ifBlank { "en" },
+                "--country", "cn",
+                "--env", "prod"
+            ).redirectErrorStream(true)
+            builder.environment()["HOME"] = filesDir.absolutePath
+            builder.environment()["TMPDIR"] = cacheDir.absolutePath
+
+            setStage("Lantern sunucu/config bilgisi alınıyor")
+            val process = builder.start()
+            radianceProcess = process
+
+            var ready = false
+            process.inputStream.bufferedReader().useLines { lines ->
+                for (line in lines) {
+                    if (stopping.get()) break
+                    when {
+                        line.startsWith("RADIANCE_READY ") -> {
+                            ready = true
+                            val elapsed = System.currentTimeMillis() - startedAt
+                            RadianceProxyState.update {
+                                it.copy(
+                                    status = RadianceStatus.RUNNING,
+                                    stage = "Bağlandı - güncel Lantern/Radiance",
+                                    address = "0.0.0.0:$LAN_PORT",
+                                    socksAddress = line.removePrefix("RADIANCE_READY ").trim(),
+                                    elapsedMs = elapsed,
+                                    error = null,
+                                    lastEvent = line
+                                )
+                            }
+                            notifyText("Radiance bağlı - LAN proxy :$LAN_PORT")
+                        }
+                        line.startsWith("RADIANCE_SELECTED ") -> {
+                            val tag = line.removePrefix("RADIANCE_SELECTED ").trim()
+                            RadianceProxyState.update { it.copy(lastEvent = "Seçilen Lantern sunucusu: $tag") }
+                        }
+                        else -> RadianceProxyState.update { it.copy(lastEvent = line.takeLast(500)) }
                     }
                 }
             }
 
-            setStage("Radiance IPC hazırlanıyor")
-            Mobile.startIPCServer(platform, opts)
-            if (stopping.get()) return
-
-            setStage("Lantern sunucu/config bilgisi alınıyor")
-            Mobile.setupRadiance(opts, emitter)
-            if (stopping.get()) return
-
-            setStage("Akıllı sunucu seçiliyor; bu birkaç dakika sürebilir")
-            Mobile.startVPN()
-            if (stopping.get()) return
-
-            setStage("Radiance SOCKS bekleniyor")
-            waitForSocks(180_000)
-
-            setStage("LAN HTTP proxy açılıyor")
-            lanProxy?.stop()
-            lanProxy = LanHttpToSocksProxy(
-                listenHost = "0.0.0.0",
-                listenPort = LAN_PORT,
-                socksHost = SOCKS_HOST,
-                socksPort = SOCKS_PORT
-            ).also { it.start() }
-
-            val elapsed = System.currentTimeMillis() - startedAt
-            RadianceProxyState.update {
-                it.copy(
-                    status = RadianceStatus.RUNNING,
-                    stage = "Bağlandı - güncel Lantern/Radiance",
-                    elapsedMs = elapsed,
-                    error = null
+            val exitCode = runCatching { process.waitFor() }.getOrDefault(-1)
+            radianceProcess = null
+            if (!stopping.get()) {
+                throw IllegalStateException(
+                    if (ready) "Radiance beklenmedik şekilde kapandı ($exitCode)" else "Radiance başlatılamadı ($exitCode)"
                 )
             }
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(NOTIFICATION_ID, notification("Radiance bağlı - LAN proxy :8080"))
         } catch (t: Throwable) {
-            val msg = t.message ?: t.javaClass.simpleName
-            runCatching { lanProxy?.stop() }
-            lanProxy = null
-            runCatching { if (Mobile.isRadianceConnected()) Mobile.stopVPN() }
-            RadianceProxyState.update {
-                it.copy(
-                    status = RadianceStatus.ERROR,
-                    stage = "Radiance hatası",
-                    elapsedMs = System.currentTimeMillis() - startedAt,
-                    error = msg
-                )
+            if (!stopping.get()) {
+                RadianceProxyState.update {
+                    it.copy(
+                        status = RadianceStatus.ERROR,
+                        stage = "Radiance hatası",
+                        elapsedMs = System.currentTimeMillis() - startedAt,
+                        error = t.message ?: t.javaClass.simpleName
+                    )
+                }
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             }
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
         }
     }
 
     private fun stopBackend() {
         if (!stopping.compareAndSet(false, true)) return
         RadianceProxyState.update { it.copy(stage = "Kapatılıyor") }
-        runCatching { lanProxy?.stop() }
-        lanProxy = null
-        runCatching {
-            if (Mobile.isRadianceConnected()) Mobile.stopVPN()
-        }
+        stopProcess()
         RadianceProxyState.reset()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun waitForSocks(timeoutMs: Long) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        var last: Throwable? = null
-        while (!stopping.get() && System.currentTimeMillis() < deadline) {
-            try {
-                Socket().use { socket ->
-                    socket.connect(InetSocketAddress(SOCKS_HOST, SOCKS_PORT), 1000)
-                }
-                return
-            } catch (t: Throwable) {
-                last = t
-                Thread.sleep(1000)
+    private fun stopProcess() {
+        val process = radianceProcess
+        radianceProcess = null
+        if (process != null) {
+            runCatching { process.destroy() }
+            runCatching {
+                if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) process.destroyForcibly()
             }
         }
-        throw IllegalStateException("Radiance SOCKS $SOCKS_HOST:$SOCKS_PORT açılmadı", last)
-    }
-
-    private fun configureRadianceEnvironment() {
-        // These are documented Radiance development/runtime switches. SOCKS mode
-        // avoids creating a second Android system VPN and lets GostX keep its LAN
-        // proxy architecture intact.
-        Os.setenv("RADIANCE_USE_SOCKS_PROXY", "true", true)
-        Os.setenv("RADIANCE_SOCKS_ADDRESS", "$SOCKS_HOST:$SOCKS_PORT", true)
-        Os.setenv("RADIANCE_COUNTRY", "cn", true)
-        Os.setenv("RADIANCE_ENV", "prod", true)
     }
 
     private fun stableDeviceId(): String {
@@ -246,19 +211,19 @@ class LanternRadianceService : Service() {
                 elapsedMs = System.currentTimeMillis() - startedAt
             )
         }
+        notifyText(stage)
+    }
+
+    private fun notifyText(text: String) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIFICATION_ID, notification(stage))
+        nm.notify(NOTIFICATION_ID, notification(text))
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    "Lantern Radiance Proxy",
-                    NotificationManager.IMPORTANCE_LOW
-                )
+                NotificationChannel(CHANNEL_ID, "Lantern Radiance Proxy", NotificationManager.IMPORTANCE_LOW)
             )
         }
     }
