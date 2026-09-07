@@ -1,0 +1,76 @@
+name: Amnezia Public Client Inspect
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [amnezia-diagnostic]
+    paths:
+      - '.github/workflows/amnezia-public-inspect.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download official Amnezia Android APK
+        run: |
+          curl -L --fail --retry 3 \
+            'https://github.com/amnezia-vpn/amnezia-client/releases/download/5.0.1.5/AmneziaVPN_5.0.1.5_android11%2B_arm64-v8a.apk' \
+            -o amnezia.apk
+          echo '78dcdcbba6c578037e597b94e781f7873b0f4efe87d8e09574649894af289986  amnezia.apk' | sha256sum -c -
+
+      - name: Extract public endpoint and RSA public-key candidates
+        shell: bash
+        run: |
+          rm -rf apk && mkdir apk
+          unzip -q amnezia.apk -d apk
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          blobs = []
+          for p in Path('apk').rglob('*'):
+              if p.is_file():
+                  try:
+                      data = p.read_bytes()
+                  except OSError:
+                      continue
+                  if b'amnezia' in data.lower() or b'BEGIN PUBLIC KEY' in data:
+                      blobs.append((str(p), data))
+
+          urls = set()
+          pems = set()
+          for name, data in blobs:
+              for m in re.finditer(rb'https://[^\x00\s"\'<>]{3,300}', data):
+                  s = m.group(0).decode('utf-8', 'ignore')
+                  if 'amnezia' in s.lower() or 'vpn' in s.lower():
+                      urls.add(s)
+              for m in re.finditer(rb'-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----', data, re.S):
+                  pem = m.group(0).decode('ascii', 'ignore')
+                  if pem:
+                      pems.add(pem)
+
+          out = []
+          out.append('OFFICIAL_APK_SHA256=78dcdcbba6c578037e597b94e781f7873b0f4efe87d8e09574649894af289986')
+          out.append('\nPUBLIC_URL_CANDIDATES:')
+          out.extend(sorted(urls) or ['<none>'])
+          out.append('\nRSA_PUBLIC_KEY_CANDIDATES:')
+          if pems:
+              for i, pem in enumerate(sorted(pems), 1):
+                  out.append(f'--- candidate {i} ---')
+                  out.append(pem)
+          else:
+              out.append('<none>')
+
+          Path('amnezia-public-info.txt').write_text('\n'.join(out), encoding='utf-8')
+          print('\n'.join(out[:80]))
+          PY
+
+      - name: Upload public inspection report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Amnezia-Public-Client-Info
+          path: amnezia-public-info.txt
+          retention-days: 7
