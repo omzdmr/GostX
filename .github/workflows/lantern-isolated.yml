@@ -16,6 +16,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply Lantern stability policy
+        run: python3 scripts/apply_lantern_stability_v2.py
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
