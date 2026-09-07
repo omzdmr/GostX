@@ -5,8 +5,8 @@
 
     <application
         android:allowBackup="false"
-        android:label="Amnezia Diagnostic"
-        android:usesCleartextTraffic="false"
+        android:label="Amnezia Gateway Diagnostic v2"
+        android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
             android:name=".MainActivity"
