@@ -1,0 +1,136 @@
+name: Amnezia Gateway Validate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [amnezia-diagnostic]
+    paths:
+      - '.github/workflows/amnezia-gateway-validate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install crypto dependency
+        run: python3 -m pip install --quiet cryptography requests
+
+      - name: Probe Amnezia gateway with public APK keys
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, uuid, requests
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+          from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+          from cryptography.hazmat.primitives import padding as sym_padding
+
+          KEYS = [
+          '''-----BEGIN PUBLIC KEY-----
+          MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAwMJbYlGxn3l+0XiGA9I/
+          BHK8HX/aet7A9GVL817apDUeL6sdISRBdopv5Y0FdrBHSJWSUdWtVxVazJB46J8x
+          327/5H5pi0nkfRbcgxBGSGxhKOvwRe+WPVb2f81jlkenZK46c9C7dNmX/310rlHY
+          BwOnZcdw2oKu6hTNDwk3nyUo2v2/leNIMLsv84RlHAX6Tyx5slq8ysewhcmdfv17
+          WQjF7albq12ZafTSjtXqDcsrk2oF8mfyzxLjSXbxQHKIDHkfz3SUXCs/H9tt1ydK
+          2Yj6nIxv98HESZ8Ng40OZPhHDex8Ru1NjcWlo2EWNM1xT8IqmBT21PLuyzGjNSwG
+          Ojnm1V2EcjerVmRNhFTJG70RkURD/i2MDbG+ZKpqPtW1uL8wEt2IkSqNfKcf+TF+
+          UJZZfm1lDUMpWJ2eWJGrgOUX8/f8v/GB+x4PxUo1m7V/pDLqCUPm3l2dkaM9P0sM
+          6lO0+jKqfIFnG1zjc3if7r1YbDsZlyl389q9Hrh7t+Lwj/JXkDxFaTnudM8egaXk
+          GX5YxZiEDmCCLRskRwBBUaYffXIpFbI8sO2Xj0J5/im5xtu7TtfJktcPzDL9uyG1
+          Ebt8oSA4FTzTid6Zwj55YgDfz0FMnNmXh80T1xMzlbi6y+BCuna+I+7McMRo8yz3
+          VzzYJ0/J7PpHpXoZv7K1qDsCAwEAAQ==
+          -----END PUBLIC KEY-----''',
+          '''-----BEGIN PUBLIC KEY-----
+          MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAj5mxl/4DL3Sk89ntxs5G
+          X3JawGQWIoq6rvNkOzNGuNgedNS2+pi6hZl3Izl1Io9om4KiUlMT6mgLO1hTr9q+
+          s7CYhlvroFA7ErucF+9L+7FCt0Igi0kIK/R2/vxd/2HaUrorn/aSvvutkYwbfxqW
+          SwtzE+RuBeDWGvEt937OW0oqYONPYv9E4T56Dz/EZ6v2t8ejAnKLbGD/GocMmipK
+          7etFSiSMAB2RmaztqTq4NleBepfO80XpYlW9pCSXuHcE8wxHczkzxsbyMAMsG/K3
+          vUQY6qPtohqqzSSBwa/8u2ptNHBeor7l7DdYXeR/Nqcc4z92VUkZ5lOVR4evkS5V
+          /wQqp5tnOJEj3NjUhEhXFoNEapbZd1bh6iQoUk7jC1TdvKJ/nPKGZAsHRpr0rNKz
+          fx/N/Oo6lr2yh/+ps6VxTkbPmB6E85WOO3UvjImZUY0XQdBjWle/4iJLdEC77Nr0
+          jXhdgeypucy6jkB6iBHMeVMlrNMEV7UxoBR/cCNx55zu/8sml5ByiDvCDT7sRomN
+          NgVt5S/FaVjYuzFUifJ12ToChXFgESKFmuso7WluEaWvMIGREdrMrKQKHfYLOzWF
+          2B5ZJDqw4o03fU4J/6rw61M1b+rjVpXMjPnzc2A+RgcjTvXv955gfZkwe4lt5wk/
+          3j8zMVo3+zLrMTAaEeIUM0UCAwEAAQ==
+          -----END PUBLIC KEY-----'''
+          ]
+
+          def aes_encrypt(data, key, iv32):
+              padder = sym_padding.PKCS7(128).padder()
+              padded = padder.update(data) + padder.finalize()
+              enc = Cipher(algorithms.AES(key), modes.CBC(iv32[:16])).encryptor()
+              return enc.update(padded) + enc.finalize()
+
+          def aes_decrypt(data, key, iv32):
+              dec = Cipher(algorithms.AES(key), modes.CBC(iv32[:16])).decryptor()
+              padded = dec.update(data) + dec.finalize()
+              unpad = sym_padding.PKCS7(128).unpadder()
+              return unpad.update(padded) + unpad.finalize()
+
+          payload = {
+              'os_version': 'android',
+              'app_version': '5.0.1.5',
+              'cli_name': 'AmneziaVPN',
+              'app_language': 'en',
+              'installation_uuid': str(uuid.uuid4()),
+          }
+
+          out = []
+          for idx, pem in enumerate(KEYS, 1):
+              key = os.urandom(32)
+              iv = os.urandom(32)
+              salt = os.urandom(8)
+              pub = serialization.load_pem_public_key(pem.encode())
+              key_payload = {
+                  'aes_key': base64.b64encode(key).decode(),
+                  'aes_iv': base64.b64encode(iv).decode(),
+                  'aes_salt': base64.b64encode(salt).decode(),
+              }
+              enc_key = pub.encrypt(json.dumps(key_payload, separators=(',', ':')).encode(), asym_padding.PKCS1v15())
+              enc_api = aes_encrypt(json.dumps(payload, separators=(',', ':')).encode(), key, iv)
+              body = {
+                  'key_payload': base64.b64encode(enc_key).decode(),
+                  'api_payload': base64.b64encode(enc_api).decode(),
+              }
+              try:
+                  s = requests.Session()
+                  s.trust_env = False
+                  r = s.post(
+                      'http://gw.amnezia.org:80/v1/services',
+                      json=body,
+                      timeout=15,
+                      headers={'X-Client-Request-ID': str(uuid.uuid4())}
+                  )
+                  out.append(f'KEY {idx}: HTTP {r.status_code}, bytes={len(r.content)}')
+                  try:
+                      plain = aes_decrypt(r.content, key, iv)
+                      text = plain.decode('utf-8')
+                      data = json.loads(text)
+                      out.append(f'KEY {idx}: DECRYPT_OK user_country_code={data.get("user_country_code")} services={len(data.get("services", []))}')
+                      for svc in data.get('services', []):
+                          if svc.get('service_type') == 'amnezia-free':
+                              out.append('FREE=' + json.dumps({
+                                  'is_available': svc.get('is_available'),
+                                  'service_protocol': svc.get('service_protocol'),
+                                  'available_countries': svc.get('available_countries'),
+                              }, ensure_ascii=False))
+                  except Exception as e:
+                      out.append(f'KEY {idx}: decrypt failed: {type(e).__name__}: {e}')
+                      out.append('BODY_PREFIX=' + repr(r.content[:240]))
+              except Exception as e:
+                  out.append(f'KEY {idx}: request failed: {type(e).__name__}: {e}')
+
+          text='\n'.join(out)
+          print(text)
+          open('amnezia-gateway-validation.txt','w').write(text+'\n')
+          PY
+
+      - name: Upload validation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Amnezia-Gateway-Validation
+          path: amnezia-gateway-validation.txt
+          retention-days: 7
