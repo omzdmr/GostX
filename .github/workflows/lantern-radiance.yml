@@ -1,0 +1,122 @@
+name: Lantern Radiance CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - lantern-radiance
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout GostX
+        uses: actions/checkout@v4
+
+      - name: Apply legacy Lantern stability policy
+        run: python3 scripts/apply_lantern_stability_v2.py
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK used by current Lantern
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Setup current Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+          cache: false
+
+      - name: Fetch pinned official Lantern core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none https://github.com/getlantern/lantern.git lantern-current
+          cd lantern-current
+          git checkout 64b959841223f913a5fea5f5c45d66a1199db863
+          git rev-parse HEAD
+
+      - name: Build official Lantern Radiance AAR
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd lantern-current
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}"
+          export ANDROID_HOME="${ANDROID_SDK_ROOT}"
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME}"
+          export PATH="$HOME/go/bin:$PATH"
+          make install-gomobile
+          make build-android \
+            ANDROID_NDK_VERSION=28.2.13676358 \
+            GOMOBILE_ANDROID_TARGET=android/arm64 \
+            APP_VERSION=9.0.29
+          test -s bin/android/liblantern.aar
+          cp bin/android/liblantern.aar ../android/app/libs/liblantern.aar
+          ls -lh ../android/app/libs/liblantern.aar
+          unzip -l ../android/app/libs/liblantern.aar | head -80
+
+      - name: Build legacy Flashlight core for A/B fallback
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DEST="android/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$DEST"
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC="$TOOLCHAIN/aarch64-linux-android26-clang"
+          export CXX="$TOOLCHAIN/aarch64-linux-android26-clang++"
+          export CGO_ENABLED=1
+          export GOOS=android
+          export GOARCH=arm64
+          export CGO_LDFLAGS="-Wl,-z,max-page-size=16384"
+          cd lanternproc
+          go mod download
+          go build -trimpath -buildmode=pie -ldflags="-s -w" -o "../$DEST/liblanternproc.so" .
+          cd ..
+          file "$DEST/liblanternproc.so"
+
+      - name: Build GostX Radiance debug APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make android
+
+      - name: Rename APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -1)
+          cp "$APK" GostX-Lantern-Radiance-v1.apk
+          sha256sum GostX-Lantern-Radiance-v1.apk
+          ls -lh GostX-Lantern-Radiance-v1.apk
+
+      - name: Upload Radiance APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GostX-Lantern-Radiance-v1
+          path: GostX-Lantern-Radiance-v1.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload official Lantern AAR for diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: liblantern-radiance-aar
+          path: android/app/libs/liblantern.aar
+          if-no-files-found: warn
+          retention-days: 7
