@@ -30,47 +30,63 @@ jobs:
           from pathlib import Path
           import re
 
-          blobs = []
-          for p in Path('apk').rglob('*'):
-              if p.is_file():
-                  try:
-                      data = p.read_bytes()
-                  except OSError:
-                      continue
-                  if b'amnezia' in data.lower() or b'BEGIN PUBLIC KEY' in data:
-                      blobs.append((str(p), data))
-
           urls = set()
-          pems = set()
-          for name, data in blobs:
-              for m in re.finditer(rb'https://[^\x00\s"\'<>]{3,300}', data):
-                  s = m.group(0).decode('utf-8', 'ignore')
-                  if 'amnezia' in s.lower() or 'vpn' in s.lower():
+          pems = []
+          contexts = []
+
+          for p in Path('apk').rglob('*'):
+              if not p.is_file():
+                  continue
+              try:
+                  data = p.read_bytes()
+              except OSError:
+                  continue
+
+              for m in re.finditer(rb'https?://[^\x00\s"\'<>]{3,300}', data):
+                  s = m.group(0).decode('utf-8', 'ignore').rstrip('),.;')
+                  if len(s) < 300:
                       urls.add(s)
+
               for m in re.finditer(rb'-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----', data, re.S):
                   pem = m.group(0).decode('ascii', 'ignore')
-                  if pem:
-                      pems.add(pem)
+                  if pem and pem not in pems:
+                      pems.append(pem)
+                      start = max(0, m.start() - 500)
+                      end = min(len(data), m.end() + 500)
+                      raw = data[start:end]
+                      printable = ''.join(chr(b) if 32 <= b < 127 or b in (10,13) else ' ' for b in raw)
+                      contexts.append((str(p), printable))
+
+          interesting = []
+          for u in sorted(urls):
+              low = u.lower()
+              if any(k in low for k in ('amnezia','gateway','amazonaws','googleapis','lambda-url','api.','/v1/')):
+                  interesting.append(u)
 
           out = []
           out.append('OFFICIAL_APK_SHA256=78dcdcbba6c578037e597b94e781f7873b0f4efe87d8e09574649894af289986')
-          out.append('\nPUBLIC_URL_CANDIDATES:')
+          out.append('\nINTERESTING_URLS:')
+          out.extend(interesting or ['<none>'])
+          out.append('\nALL_HTTP_URLS:')
           out.extend(sorted(urls) or ['<none>'])
-          out.append('\nRSA_PUBLIC_KEY_CANDIDATES:')
+          out.append('\nRSA_PUBLIC_KEYS_AND_NEARBY_TEXT:')
           if pems:
-              for i, pem in enumerate(sorted(pems), 1):
+              for i, pem in enumerate(pems, 1):
                   out.append(f'--- candidate {i} ---')
                   out.append(pem)
+                  if i <= len(contexts):
+                      out.append(f'FILE={contexts[i-1][0]}')
+                      out.append('NEARBY=' + contexts[i-1][1].replace('\n',' ')[:1800])
           else:
               out.append('<none>')
 
           Path('amnezia-public-info.txt').write_text('\n'.join(out), encoding='utf-8')
-          print('\n'.join(out[:80]))
+          print('\n'.join(out[:220]))
           PY
 
       - name: Upload public inspection report
         uses: actions/upload-artifact@v4
         with:
-          name: Amnezia-Public-Client-Info
+          name: Amnezia-Public-Client-Info-v2
           path: amnezia-public-info.txt
           retention-days: 7
