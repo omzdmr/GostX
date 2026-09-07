@@ -70,6 +70,12 @@ jobs:
           ls -lh ../android/app/libs/liblantern.aar
           unzip -l ../android/app/libs/liblantern.aar | head -80
 
+      - name: Switch to Go 1.22 for legacy Flashlight fallback
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.4'
+          cache: false
+
       - name: Build legacy Flashlight core for A/B fallback
         shell: bash
         run: |
