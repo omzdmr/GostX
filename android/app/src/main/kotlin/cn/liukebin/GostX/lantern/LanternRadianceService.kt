@@ -74,7 +74,7 @@ class LanternRadianceService : Service() {
 
     @Volatile private var radianceProcess: Process? = null
     @Volatile private var startedAt = 0L
-    @Volatile private var lastUidRxBytes = TrafficStats.UNSUPPORTED
+    @Volatile private var lastUidRxBytes = TrafficStats.UNSUPPORTED.toLong()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -266,12 +266,12 @@ class LanternRadianceService : Service() {
 
     private fun sampleUsageAndRotateIfNeeded() {
         val current = TrafficStats.getUidRxBytes(AndroidProcess.myUid())
-        if (current == TrafficStats.UNSUPPORTED) return
+        if (current == TrafficStats.UNSUPPORTED.toLong()) return
 
         val previous = lastUidRxBytes
         lastUidRxBytes = current
         if (radianceProcess?.isAlive != true) return
-        if (previous == TrafficStats.UNSUPPORTED || current < previous) return
+        if (previous == TrafficStats.UNSUPPORTED.toLong() || current < previous) return
 
         val delta = current - previous
         if (delta <= 0L) return
