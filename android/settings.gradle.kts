@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "gostx"
 include(":app")
+include(":amneziadiag")
