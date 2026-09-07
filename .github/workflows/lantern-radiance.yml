@@ -93,8 +93,12 @@ jobs:
           export GOARCH=arm64
           export CGO_LDFLAGS="-Wl,-z,max-page-size=16384"
           cd lanternproc
+          # This branch did not carry a go.sum. Let Go resolve the exact
+          # transitive checksums before the Android cross-build instead of
+          # failing on missing Flashlight module sum entries.
+          go mod tidy
           go mod download
-          go build -trimpath -buildmode=pie -ldflags="-s -w" -o "../$DEST/liblanternproc.so" .
+          go build -mod=mod -trimpath -buildmode=pie -ldflags="-s -w" -o "../$DEST/liblanternproc.so" .
           cd ..
           file "$DEST/liblanternproc.so"
 
