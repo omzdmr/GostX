@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -29,7 +28,7 @@ func main() {
 
 	flag.StringVar(&dataDir, "data-dir", "", "Radiance data directory")
 	flag.StringVar(&logDir, "log-dir", "", "Radiance log directory")
-	flag.StringVar(&listen, "listen", "127.0.0.1:18080", "local mixed HTTP/SOCKS listen address")
+	flag.StringVar(&listen, "listen", "0.0.0.0:8080", "mixed HTTP/SOCKS listen address")
 	flag.StringVar(&deviceID, "device-id", "", "Lantern client device ID")
 	flag.StringVar(&locale, "locale", "en", "locale")
 	flag.StringVar(&country, "country", "cn", "client country hint")
@@ -49,9 +48,6 @@ func main() {
 		log.Fatalf("create log dir: %v", err)
 	}
 
-	// The novpn build swaps the TUN inbound for Radiance's built-in mixed
-	// HTTP/SOCKS inbound. This keeps GostX out of Android's VpnService path while
-	// still using Lantern's official config, server manager and auto-selection.
 	_ = os.Setenv("RADIANCE_USE_SOCKS_PROXY", "true")
 	_ = os.Setenv("RADIANCE_SOCKS_ADDRESS", listen)
 	_ = os.Setenv("RADIANCE_COUNTRY", country)
@@ -88,9 +84,6 @@ func main() {
 
 	be.Start()
 
-	// A cached config can be used immediately. A fresh install may need a config
-	// fetch first, so retry auto-connect for up to three minutes. Lantern's own
-	// Smart Location remains responsible for selecting the actual server.
 	deadline := time.Now().Add(3 * time.Minute)
 	var lastErr error
 	for ctx.Err() == nil && time.Now().Before(deadline) {
@@ -112,17 +105,7 @@ func main() {
 		log.Fatalf("Radiance auto connect failed: %v", lastErr)
 	}
 
-	selected := ""
-	if servers := be.Servers(); len(servers) > 0 {
-		// Keep diagnostics lightweight. The actual selected tag is emitted by
-		// AutoSelectedEvent above and may change while Smart Location optimizes.
-		if raw, jerr := json.Marshal(map[string]any{"count": len(servers)}); jerr == nil {
-			fmt.Printf("RADIANCE_SERVERS %s\n", raw)
-		}
-	}
-	_ = selected
 	fmt.Printf("RADIANCE_READY %s\n", listen)
-
 	<-ctx.Done()
 	_ = be.DisconnectVPN()
 }
