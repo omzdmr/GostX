@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
@@ -62,6 +64,7 @@ fun LanternProxyScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -83,7 +86,16 @@ fun LanternProxyScreen(onBack: () -> Unit) {
                     Text("Durum: ${radiance.stage}")
                     if (radiance.status == RadianceStatus.RUNNING) {
                         Text("LAN HTTP proxy: ${radiance.address}", style = MaterialTheme.typography.headlineSmall)
-                        Text("Radiance SOCKS: ${radiance.socksAddress}")
+                        Text("Radiance HTTP/SOCKS: ${radiance.socksAddress}")
+                    }
+                    if (radiance.selectedLocation.isNotBlank()) {
+                        Text("Smart Location: ${radiance.selectedLocation}")
+                    }
+                    if (radiance.selectedProtocol.isNotBlank()) {
+                        Text("Protokol: ${radiance.selectedProtocol}")
+                    }
+                    if (radiance.selectedTag.isNotBlank()) {
+                        Text("Sunucu etiketi: ${radiance.selectedTag}", style = MaterialTheme.typography.bodySmall)
                     }
                     radiance.elapsedMs?.let {
                         Text(String.format(Locale.US, "Gecen sure: %.1f sn", it / 1000.0))
@@ -95,7 +107,15 @@ fun LanternProxyScreen(onBack: () -> Unit) {
                         Text("Hata: $it", color = MaterialTheme.colorScheme.error)
                     }
                     if (radiance.deviceId.isNotBlank()) {
+                        val usageMb = radiance.usageBytes / (1024.0 * 1024.0)
                         Text("Device UUID: ${radiance.deviceId}", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            String.format(Locale.US, "UUID sayaci: %.1f / 500 MB", usageMb),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        if (radiance.rotationCount > 0) {
+                            Text("UUID yenileme: ${radiance.rotationCount} kez", style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -113,7 +133,7 @@ fun LanternProxyScreen(onBack: () -> Unit) {
                         ) { Text("Disconnect") }
                     }
                     Text(
-                        "Not: Resmi Lantern'in akilli secimi 2-3 dakika surebilir. Bu surum 180 saniyeye kadar bekler.",
+                        "Smart Location ilk baglantida 2-3 dakika surebilir. Her 500 MB alinan trafikte yalnizca Lantern istemci UUID'si yenilenir ve Radiance temizce yeniden baglanir.",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }

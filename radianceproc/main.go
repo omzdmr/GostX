@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +17,28 @@ import (
 	"github.com/getlantern/radiance/events"
 	"github.com/getlantern/radiance/vpn"
 )
+
+func emitSelected(be *backend.LocalBackend, tag string) {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return
+	}
+	fmt.Printf("RADIANCE_SELECTED %s\n", tag)
+	server, ok := be.GetServerByTag(tag)
+	if !ok || server == nil {
+		return
+	}
+	// Deliberately expose only diagnostic metadata. Never print server options,
+	// credentials, tokens or transport secrets into Android-visible stdout.
+	safe := map[string]any{
+		"tag":      server.Tag,
+		"type":     server.Type,
+		"location": server.Location,
+	}
+	if raw, err := json.Marshal(safe); err == nil {
+		fmt.Printf("RADIANCE_SELECTED_JSON %s\n", raw)
+	}
+}
 
 func main() {
 	var dataDir string
@@ -77,9 +100,7 @@ func main() {
 		}
 	})
 	events.SubscribeContext(ctx, func(evt vpn.AutoSelectedEvent) {
-		if strings.TrimSpace(evt.Selected) != "" {
-			fmt.Printf("RADIANCE_SELECTED %s\n", evt.Selected)
-		}
+		emitSelected(be, evt.Selected)
 	})
 
 	be.Start()
