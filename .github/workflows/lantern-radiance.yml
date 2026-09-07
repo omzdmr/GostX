@@ -102,11 +102,43 @@ jobs:
           cd ..
           file "$DEST/liblanternproc.so"
 
-      - name: Build GostX Radiance debug APK
+      # libgost/go.mod requires Go 1.26.3. The legacy fallback step above
+      # intentionally switches to Go 1.22, so restore the modern toolchain
+      # before make android invokes gomobile for libgost.
+      - name: Restore Go 1.26.3 for GostX
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+          cache: false
+
+      - name: Install gomobile for GostX
         shell: bash
         run: |
           set -euxo pipefail
-          make android
+          go version
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+
+      - name: Build GostX Radiance debug APK
+        shell: bash
+        run: |
+          set +e
+          make android 2>&1 | tee gostx-android-build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "===== GostX build failure tail ====="
+            tail -n 220 gostx-android-build.log
+          fi
+          exit "$status"
+
+      - name: Upload GostX build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gostx-android-build-log
+          path: gostx-android-build.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Rename APK
         shell: bash
