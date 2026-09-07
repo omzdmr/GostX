@@ -1,0 +1,52 @@
+name: Amnezia Public Client Inspect
+
+on:
+  push:
+    branches:
+      - amnezia-diagnostic
+    paths:
+      - '.github/workflows/amnezia-inspect.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download official Amnezia Android APK
+        run: |
+          curl -L --fail --retry 3 \
+            'https://github.com/amnezia-vpn/amnezia-client/releases/download/5.0.1.5/AmneziaVPN_5.0.1.5_android11%2B_arm64-v8a.apk' \
+            -o amnezia.apk
+          echo '78dcdcbba6c578037e597b94e781f7873b0f4efe87d8e09574649894af289986  amnezia.apk' | sha256sum -c -
+
+      - name: Extract public runtime constants
+        run: |
+          rm -rf apk && mkdir apk
+          unzip -q amnezia.apk -d apk
+          find apk -type f -name '*.so' -print > so-files.txt
+          : > amnezia-public-strings.txt
+          while IFS= read -r so; do
+            echo "===== $so =====" >> amnezia-public-strings.txt
+            strings -a "$so" | grep -E -i \
+              'https?://|BEGIN PUBLIC KEY|END PUBLIC KEY|amnezia|gateway|endpoints\.json|v1/services' \
+              >> amnezia-public-strings.txt || true
+          done < so-files.txt
+          grep -E -i 'https?://|BEGIN PUBLIC KEY|END PUBLIC KEY|gateway|endpoints\.json|v1/services' amnezia-public-strings.txt \
+            | sort -u | head -n 400 > amnezia-public-candidates.txt || true
+          cat amnezia-public-candidates.txt
+
+      - name: Upload inspection text
+        uses: actions/upload-artifact@v4
+        with:
+          name: amnezia-public-inspection
+          path: |
+            so-files.txt
+            amnezia-public-candidates.txt
+            amnezia-public-strings.txt
+          retention-days: 7
