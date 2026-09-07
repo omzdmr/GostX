@@ -6,37 +6,60 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
 import android.os.Bundle;
-import android.telephony.TelephonyManager;
+import android.util.Base64;
 import android.view.Gravity;
-import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Arrays;
 import java.util.Locale;
-import java.util.Map;
-import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
 public class MainActivity extends Activity {
+    private static final String GATEWAY = "http://gw.amnezia.org:80/v1/services";
+
+    // Public RSA key extracted from the official AmneziaVPN 5.0.1.5 Android APK
+    // (official APK SHA-256: 78dcdcbba6c578037e597b94e781f7873b0f4efe87d8e09574649894af289986).
+    // This is a public encryption key, not a credential or private key.
+    private static final String PROD_PUBLIC_KEY =
+            "-----BEGIN PUBLIC KEY-----\n" +
+            "MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAj5mxl/4DL3Sk89ntxs5G\n" +
+            "X3JawGQWIoq6rvNkOzNGuNgedNS2+pi6hZl3Izl1Io9om4KiUlMT6mgLO1hTr9q+\n" +
+            "s7CYhlvroFA7ErucF+9L+7FCt0Igi0kIK/R2/vxd/2HaUrorn/aSvvutkYwbfxqW\n" +
+            "SwtzE+RuBeDWGvEt937OW0oqYONPYv9E4T56Dz/EZ6v2t8ejAnKLbGD/GocMmipK\n" +
+            "7etFSiSMAB2RmaztqTq4NleBepfO80XpYlW9pCSXuHcE8wxHczkzxsbyMAMsG/K3\n" +
+            "vUQY6qPtohqqzSSBwa/8u2ptNHBeor7l7DdYXeR/Nqcc4z92VUkZ5lOVR4evkS5V\n" +
+            "/wQqp5tnOJEj3NjUhEhXFoNEapbZd1bh6iQoUk7jC1TdvKJ/nPKGZAsHRpr0rNKz\n" +
+            "fx/N/Oo6lr2yh/+ps6VxTkbPmB6E85WOO3UvjImZUY0XQdBjWle/4iJLdEC77Nr0\n" +
+            "jXhdgeypucy6jkB6iBHMeVMlrNMEV7UxoBR/cCNx55zu/8sml5ByiDvCDT7sRomN\n" +
+            "NgVt5S/FaVjYuzFUifJ12ToChXFgESKFmuso7WluEaWvMIGREdrMrKQKHfYLOzWF\n" +
+            "2B5ZJDqw4o03fU4J/6rw61M1b+rjVpXMjPnzc2A+RgcjTvXv955gfZkwe4lt5wk/\n" +
+            "3j8zMVo3+zLrMTAaEeIUM0UCAwEAAQ==\n" +
+            "-----END PUBLIC KEY-----";
+
     private TextView resultView;
     private Button runButton;
     private Button copyButton;
@@ -54,24 +77,24 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.rgb(248, 249, 252));
 
         TextView title = new TextView(this);
-        title.setText("Amnezia Diagnostic");
-        title.setTextSize(26);
+        title.setText("Amnezia Gateway Diagnostic v2");
+        title.setTextSize(24);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(Color.rgb(20, 20, 24));
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Türkiye mi, Çin mi? Telefon ayarını ve gerçek internet çıkışını ayrı ayrı ölçer. Test sırasında diğer VPN/proxy uygulamalarını kapat.");
+        subtitle.setText("Bu sürüm artık tahmin yapmıyor. Resmi Amnezia istemcisinin kullandığı şifreli /v1/services API çağrısını doğrudan yapar. Test sırasında diğer VPN/proxy uygulamalarını kapat.");
         subtitle.setTextSize(15);
         subtitle.setTextColor(Color.DKGRAY);
         subtitle.setPadding(0, dp(8), 0, dp(18));
         root.addView(subtitle);
 
         runButton = new Button(this);
-        runButton.setText("TESTİ BAŞLAT");
+        runButton.setText("GERÇEK AMNEZIA API TESTİ");
         runButton.setAllCaps(false);
         runButton.setTextSize(16);
-        runButton.setOnClickListener(v -> runDiagnostics());
+        runButton.setOnClickListener(v -> runProbe());
         root.addView(runButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
@@ -81,14 +104,14 @@ public class MainActivity extends Activity {
         copyButton.setAllCaps(false);
         copyButton.setEnabled(false);
         copyButton.setOnClickListener(v -> copyReport());
-        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        copyParams.topMargin = dp(8);
-        root.addView(copyButton, copyParams);
+        cp.topMargin = dp(8);
+        root.addView(copyButton, cp);
 
         resultView = new TextView(this);
-        resultView.setText("Hazır.\n\nNot: Bu uygulama Amnezia'nın şifreli production API protokolünü taklit etmez. Bunun yerine backend'in göreceği kaynak IP ülkesini üç bağımsız servisten ölçer. App Store/Play Store bölgesi ayrı gösterilir.");
+        resultView.setText("Hazır.\n\nBeklenen alanlar:\n• Amnezia user_country_code\n• Amnezia Free mevcut mu\n• is_available\n• service_protocol\n• servis sayısı");
         resultView.setTextSize(15);
         resultView.setTextColor(Color.rgb(25, 25, 28));
         resultView.setTextIsSelectable(true);
@@ -101,69 +124,20 @@ public class MainActivity extends Activity {
         setContentView(scroll);
     }
 
-    private void runDiagnostics() {
+    private void runProbe() {
         runButton.setEnabled(false);
         copyButton.setEnabled(false);
-        resultView.setText("Test ediliyor...\n\nIP ülke servisleri sırayla kontrol ediliyor. Bir servis Çin'de engelliyse diğerleri devam edecek.");
+        resultView.setText("Amnezia production gateway sorgulanıyor...\n\nRSA + AES isteği hazırlanıyor ve /v1/services cevabı decrypt ediliyor.");
 
         executor.execute(() -> {
-            StringBuilder report = new StringBuilder();
-            report.append("=== Amnezia Diagnostic ===\n\n");
-
-            boolean vpnActive = isVpnActive();
-            report.append("VPN transport aktif: ").append(vpnActive ? "EVET" : "HAYIR").append('\n');
-            report.append("Aktif bağlantı: ").append(activeTransport()).append('\n');
-            report.append("Telefon locale ülkesi: ").append(localeCountry()).append('\n');
-            report.append("SIM ülkesi: ").append(simCountry()).append('\n');
-            report.append("Mobil ağ ülkesi: ").append(networkCountry()).append('\n');
-            report.append("Saat dilimi: ").append(TimeZone.getDefault().getID()).append("\n\n");
-
-            if (vpnActive) {
-                report.append("UYARI: Android şu anda aktif bir VPN transport görüyor. Aşağıdaki IP ülkesi VPN çıkış ülkesi olabilir.\n\n");
+            String report;
+            try {
+                report = queryServices();
+            } catch (Exception e) {
+                report = "=== Amnezia Gateway Diagnostic v2 ===\n\nBAŞARISIZ\n" + shortError(e) +
+                        "\n\nNot: Diğer VPN/proxy'leri kapatıp tekrar dene. Bu çağrı doğrudan gw.amnezia.org:80 adresine gider.";
             }
-
-            List<GeoResult> geoResults = new ArrayList<>();
-            geoResults.add(fetchIpWho());
-            geoResults.add(fetchCountryIs());
-            geoResults.add(fetchIpApi());
-
-            report.append("--- Gerçek internet çıkışı ---\n");
-            for (GeoResult r : geoResults) {
-                report.append(r.source).append(": ");
-                if (r.ok) {
-                    report.append(r.countryCode);
-                    if (!r.ip.isEmpty()) report.append(" | IP ").append(r.ip);
-                    if (!r.extra.isEmpty()) report.append(" | ").append(r.extra);
-                } else {
-                    report.append("BAŞARISIZ | ").append(r.error);
-                }
-                report.append('\n');
-            }
-
-            String consensus = consensusCountry(geoResults);
-            report.append("\nIP ülke sonucu: ").append(consensus.isEmpty() ? "BELİRLENEMEDİ" : consensus).append('\n');
-
-            Reachability amnezia = testReachability("https://amnezia.org/");
-            report.append("Amnezia.org erişimi: ")
-                    .append(amnezia.ok ? "OK" : "BAŞARISIZ")
-                    .append(" | ")
-                    .append(amnezia.detail)
-                    .append('\n');
-
-            report.append("\n--- Yorum ---\n");
-            if ("CN".equals(consensus)) {
-                report.append("ÇIKIŞIN ÇİN. Android/mağaza/locale Türkiye görünse bile internet isteğin Çin IP'sinden çıkıyor. Amnezia'nın ilk ülke sınıflandırmasında CN görmesi beklenir.");
-            } else if ("TR".equals(consensus)) {
-                report.append("ÇIKIŞIN TÜRKİYE. Amnezia seni Türkiye sanıyorsa sebep büyük olasılıkla mağaza bölgesi değil, mevcut ağ/VPN çıkışının TR olması.");
-            } else if (!consensus.isEmpty()) {
-                report.append("ÇIKIŞ ÜLKESİ ").append(consensus).append(". Amnezia'nın bölge seçimini mağaza yerine bu IP çıkışına göre yapması beklenir.");
-            } else {
-                report.append("Ülke servislerinden yeterli cevap alınamadı. Sonucu kopyalayıp gönder; hangi isteklerin Çin'de engellendiğini oradan ayırabiliriz.");
-            }
-
-            report.append("\n\nBu APK bağlantı açmaz ve Amnezia Free sunucusu kullanmaz; sadece bölge/erişim teşhisi yapar.");
-
-            lastReport = report.toString();
+            lastReport = report;
             runOnUiThread(() -> {
                 resultView.setText(lastReport);
                 runButton.setEnabled(true);
@@ -172,190 +146,191 @@ public class MainActivity extends Activity {
         });
     }
 
-    private GeoResult fetchIpWho() {
-        try {
-            JSONObject j = getJson("https://ipwho.is/");
-            if (j.has("success") && !j.optBoolean("success", true)) {
-                return GeoResult.fail("ipwho.is", j.optString("message", "service error"));
-            }
-            String isp = "";
-            JSONObject connection = j.optJSONObject("connection");
-            if (connection != null) isp = connection.optString("isp", "");
-            return GeoResult.ok("ipwho.is", j.optString("country_code", ""), j.optString("ip", ""), isp);
-        } catch (Exception e) {
-            return GeoResult.fail("ipwho.is", shortError(e));
-        }
-    }
+    private String queryServices() throws Exception {
+        byte[] aesKey = randomBytes(32);
+        byte[] aesIv = randomBytes(32);
+        byte[] aesSalt = randomBytes(8);
 
-    private GeoResult fetchCountryIs() {
-        try {
-            JSONObject j = getJson("https://api.country.is/");
-            return GeoResult.ok("api.country.is", j.optString("country", ""), j.optString("ip", ""), "");
-        } catch (Exception e) {
-            return GeoResult.fail("api.country.is", shortError(e));
-        }
-    }
+        JSONObject keyPayload = new JSONObject();
+        keyPayload.put("aes_key", b64(aesKey));
+        keyPayload.put("aes_iv", b64(aesIv));
+        keyPayload.put("aes_salt", b64(aesSalt));
 
-    private GeoResult fetchIpApi() {
-        try {
-            JSONObject j = getJson("https://ipapi.co/json/");
-            String error = j.optString("reason", "");
-            if (j.optBoolean("error", false)) return GeoResult.fail("ipapi.co", error.isEmpty() ? "service error" : error);
-            return GeoResult.ok("ipapi.co", j.optString("country_code", ""), j.optString("ip", ""), j.optString("org", ""));
-        } catch (Exception e) {
-            return GeoResult.fail("ipapi.co", shortError(e));
-        }
-    }
+        JSONObject apiPayload = new JSONObject();
+        apiPayload.put("os_version", "android");
+        apiPayload.put("app_version", "5.0.1.5");
+        apiPayload.put("cli_name", "AmneziaVPN");
+        apiPayload.put("app_language", Locale.getDefault().getLanguage());
+        apiPayload.put("installation_uuid", installationUuid());
 
-    private JSONObject getJson(String url) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setConnectTimeout(6500);
-        c.setReadTimeout(6500);
-        c.setRequestProperty("User-Agent", "GostX-Amnezia-Diagnostic/1.0 Android");
+        byte[] encryptedKeyPayload = rsaEncrypt(
+                keyPayload.toString().getBytes(StandardCharsets.UTF_8),
+                loadPublicKey(PROD_PUBLIC_KEY));
+        byte[] encryptedApiPayload = aesCrypt(
+                Cipher.ENCRYPT_MODE,
+                apiPayload.toString().getBytes(StandardCharsets.UTF_8),
+                aesKey,
+                aesIv);
+
+        JSONObject requestBody = new JSONObject();
+        requestBody.put("key_payload", b64(encryptedKeyPayload));
+        requestBody.put("api_payload", b64(encryptedApiPayload));
+        byte[] requestBytes = requestBody.toString().getBytes(StandardCharsets.UTF_8);
+
+        long started = System.currentTimeMillis();
+        HttpURLConnection c = (HttpURLConnection) new URL(GATEWAY).openConnection();
+        c.setConnectTimeout(12000);
+        c.setReadTimeout(16000);
+        c.setRequestMethod("POST");
+        c.setDoOutput(true);
+        c.setInstanceFollowRedirects(false);
+        c.setRequestProperty("Content-Type", "application/json");
         c.setRequestProperty("Accept", "application/json");
-        c.setInstanceFollowRedirects(true);
-        int code = c.getResponseCode();
-        InputStream stream = code >= 200 && code < 400 ? c.getInputStream() : c.getErrorStream();
-        String body = readAll(stream);
+        c.setRequestProperty("X-Client-Request-ID", UUID.randomUUID().toString());
+        c.setRequestProperty("User-Agent", "AmneziaVPN/5.0.1.5 Android");
+        c.setFixedLengthStreamingMode(requestBytes.length);
+        try (OutputStream out = c.getOutputStream()) {
+            out.write(requestBytes);
+        }
+
+        int httpCode = c.getResponseCode();
+        InputStream stream = httpCode >= 200 && httpCode < 400 ? c.getInputStream() : c.getErrorStream();
+        byte[] encryptedResponse = readAllBytes(stream);
+        long elapsed = System.currentTimeMillis() - started;
         c.disconnect();
-        if (code < 200 || code >= 400) throw new Exception("HTTP " + code + " " + trim(body, 80));
-        return new JSONObject(body);
-    }
 
-    private Reachability testReachability(String url) {
-        long start = System.currentTimeMillis();
-        HttpURLConnection c = null;
-        try {
-            c = (HttpURLConnection) new URL(url).openConnection();
-            c.setConnectTimeout(6500);
-            c.setReadTimeout(6500);
-            c.setRequestMethod("GET");
-            c.setRequestProperty("User-Agent", "GostX-Amnezia-Diagnostic/1.0 Android");
-            c.setInstanceFollowRedirects(true);
-            int code = c.getResponseCode();
-            long ms = System.currentTimeMillis() - start;
-            return new Reachability(code >= 200 && code < 500, "HTTP " + code + " | " + ms + " ms");
-        } catch (Exception e) {
-            return new Reachability(false, shortError(e));
-        } finally {
-            if (c != null) c.disconnect();
+        if (encryptedResponse.length == 0) {
+            throw new Exception("Gateway HTTP " + httpCode + " ama cevap gövdesi boş (" + elapsed + " ms)");
         }
-    }
 
-    private String consensusCountry(List<GeoResult> results) {
-        Map<String, Integer> counts = new HashMap<>();
-        for (GeoResult r : results) {
-            if (!r.ok) continue;
-            String cc = r.countryCode == null ? "" : r.countryCode.trim().toUpperCase(Locale.ROOT);
-            if (cc.length() != 2) continue;
-            counts.put(cc, counts.getOrDefault(cc, 0) + 1);
-        }
-        String best = "";
-        int bestCount = 0;
-        for (Map.Entry<String, Integer> e : counts.entrySet()) {
-            if (e.getValue() > bestCount) {
-                best = e.getKey();
-                bestCount = e.getValue();
+        byte[] plain = aesCrypt(Cipher.DECRYPT_MODE, encryptedResponse, aesKey, aesIv);
+        String text = new String(plain, StandardCharsets.UTF_8);
+        JSONObject root = new JSONObject(text);
+
+        String country = root.optString("user_country_code", "BELİRSİZ");
+        JSONArray services = root.optJSONArray("services");
+        int serviceCount = services == null ? 0 : services.length();
+
+        JSONObject free = null;
+        StringBuilder serviceTypes = new StringBuilder();
+        if (services != null) {
+            for (int i = 0; i < services.length(); i++) {
+                JSONObject s = services.optJSONObject(i);
+                if (s == null) continue;
+                String type = s.optString("service_type", "?");
+                if (serviceTypes.length() > 0) serviceTypes.append(", ");
+                serviceTypes.append(type);
+                if ("amnezia-free".equals(type)) free = s;
             }
         }
-        return bestCount >= 2 ? best : "";
-    }
 
-    private boolean isVpnActive() {
-        try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            Network active = cm.getActiveNetwork();
-            NetworkCapabilities caps = active == null ? null : cm.getNetworkCapabilities(active);
-            return caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
-        } catch (Exception ignored) {
-            return false;
+        StringBuilder report = new StringBuilder();
+        report.append("=== Amnezia Gateway Diagnostic v2 ===\n\n");
+        report.append("Gateway: ").append(GATEWAY).append('\n');
+        report.append("HTTP: ").append(httpCode).append('\n');
+        report.append("Yanıt süresi: ").append(elapsed).append(" ms\n");
+        report.append("Decrypt: OK\n\n");
+        report.append("Amnezia user_country_code: ").append(country).append('\n');
+        report.append("Servis sayısı: ").append(serviceCount).append('\n');
+        report.append("Servisler: ").append(serviceTypes.length() == 0 ? "YOK" : serviceTypes).append("\n\n");
+
+        report.append("--- Amnezia Free ---\n");
+        if (free == null) {
+            report.append("Free servis cevabında YOK\n");
+        } else {
+            report.append("Free servis: VAR\n");
+            report.append("is_available: ").append(free.optBoolean("is_available", true)).append('\n');
+            report.append("service_protocol: ").append(free.optString("service_protocol", "BELİRSİZ")).append('\n');
+            JSONArray countries = free.optJSONArray("available_countries");
+            if (countries != null) report.append("available_countries: ").append(countries.toString()).append('\n');
+            JSONObject info = free.optJSONObject("service_info");
+            if (info != null && info.has("api_endpoint")) {
+                report.append("api_endpoint mevcut: EVET\n");
+            }
         }
-    }
 
-    private String activeTransport() {
-        try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            Network active = cm.getActiveNetwork();
-            NetworkCapabilities caps = active == null ? null : cm.getNetworkCapabilities(active);
-            if (caps == null) return "YOK/BELİRSİZ";
-            List<String> names = new ArrayList<>();
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) names.add("VPN");
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) names.add("Wi-Fi");
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) names.add("Mobil");
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) names.add("Ethernet");
-            return names.isEmpty() ? "Diğer" : join(names, " + ");
-        } catch (Exception e) {
-            return "BELİRSİZ";
+        report.append("\n--- Sonuç ---\n");
+        if (free != null && free.optBoolean("is_available", true)) {
+            report.append("AMNEZIA FREE BU AĞ İÇİN SUNULUYOR. Sonraki adım Free config'i aynı gateway'den alıp AWG bağlantısını test etmek.");
+        } else {
+            report.append("AMNEZIA FREE BU AĞ İÇİN SUNULMUYOR veya servis listesinde yok.");
         }
+
+        report.append("\n\nHam cevap özeti: ").append(trim(text, 1200));
+        return report.toString();
     }
 
-    private String localeCountry() {
-        try {
-            String c = getResources().getConfiguration().getLocales().get(0).getCountry();
-            return emptyAsUnknown(c);
-        } catch (Exception e) {
-            return "BELİRSİZ";
+    private String installationUuid() {
+        String value = getSharedPreferences("diag", MODE_PRIVATE).getString("installation_uuid", "");
+        if (value == null || value.isEmpty()) {
+            value = UUID.randomUUID().toString();
+            getSharedPreferences("diag", MODE_PRIVATE).edit().putString("installation_uuid", value).apply();
         }
+        return value;
     }
 
-    private String simCountry() {
-        try {
-            TelephonyManager tm = (TelephonyManager) getSystemService(Context.TELEPHONY_SERVICE);
-            return emptyAsUnknown(tm.getSimCountryIso()).toUpperCase(Locale.ROOT);
-        } catch (Exception e) {
-            return "BELİRSİZ";
-        }
+    private static PublicKey loadPublicKey(String pem) throws Exception {
+        String clean = pem
+                .replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s", "");
+        byte[] der = Base64.decode(clean, Base64.DEFAULT);
+        return KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
     }
 
-    private String networkCountry() {
-        try {
-            TelephonyManager tm = (TelephonyManager) getSystemService(Context.TELEPHONY_SERVICE);
-            return emptyAsUnknown(tm.getNetworkCountryIso()).toUpperCase(Locale.ROOT);
-        } catch (Exception e) {
-            return "BELİRSİZ";
+    private static byte[] rsaEncrypt(byte[] plain, PublicKey key) throws Exception {
+        Cipher cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
+        cipher.init(Cipher.ENCRYPT_MODE, key);
+        return cipher.doFinal(plain);
+    }
+
+    private static byte[] aesCrypt(int mode, byte[] input, byte[] key, byte[] iv32) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+        SecretKeySpec secretKey = new SecretKeySpec(key, "AES");
+        IvParameterSpec iv = new IvParameterSpec(Arrays.copyOf(iv32, 16));
+        cipher.init(mode, secretKey, iv);
+        return cipher.doFinal(input);
+    }
+
+    private static byte[] randomBytes(int size) {
+        byte[] out = new byte[size];
+        new SecureRandom().nextBytes(out);
+        return out;
+    }
+
+    private static String b64(byte[] data) {
+        return Base64.encodeToString(data, Base64.NO_WRAP);
+    }
+
+    private static byte[] readAllBytes(InputStream in) throws Exception {
+        if (in == null) return new byte[0];
+        try (InputStream input = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = input.read(buf)) >= 0) {
+                if (n > 0) out.write(buf, 0, n);
+            }
+            return out.toByteArray();
         }
     }
 
     private void copyReport() {
         if (lastReport.isEmpty()) return;
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        clipboard.setPrimaryClip(ClipData.newPlainText("Amnezia Diagnostic", lastReport));
+        clipboard.setPrimaryClip(ClipData.newPlainText("Amnezia Gateway Diagnostic v2", lastReport));
         Toast.makeText(this, "Rapor kopyalandı", Toast.LENGTH_SHORT).show();
-    }
-
-    private static String readAll(InputStream stream) throws Exception {
-        if (stream == null) return "";
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) sb.append(line);
-        }
-        return sb.toString();
     }
 
     private static String shortError(Exception e) {
         String s = e.getClass().getSimpleName();
         if (e.getMessage() != null && !e.getMessage().trim().isEmpty()) s += ": " + e.getMessage().trim();
-        return trim(s, 140);
+        return trim(s, 700);
     }
 
     private static String trim(String s, int max) {
         if (s == null) return "";
         s = s.replace('\n', ' ').replace('\r', ' ').trim();
         return s.length() <= max ? s : s.substring(0, max) + "...";
-    }
-
-    private static String emptyAsUnknown(String s) {
-        return s == null || s.trim().isEmpty() ? "BELİRSİZ" : s.trim();
-    }
-
-    private static String join(List<String> values, String separator) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < values.size(); i++) {
-            if (i > 0) sb.append(separator);
-            sb.append(values.get(i));
-        }
-        return sb.toString();
     }
 
     private int dp(int value) {
@@ -366,41 +341,5 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         executor.shutdownNow();
         super.onDestroy();
-    }
-
-    private static final class GeoResult {
-        final String source;
-        final boolean ok;
-        final String countryCode;
-        final String ip;
-        final String extra;
-        final String error;
-
-        private GeoResult(String source, boolean ok, String countryCode, String ip, String extra, String error) {
-            this.source = source;
-            this.ok = ok;
-            this.countryCode = countryCode == null ? "" : countryCode.toUpperCase(Locale.ROOT);
-            this.ip = ip == null ? "" : ip;
-            this.extra = extra == null ? "" : extra;
-            this.error = error == null ? "" : error;
-        }
-
-        static GeoResult ok(String source, String countryCode, String ip, String extra) {
-            return new GeoResult(source, true, countryCode, ip, extra, "");
-        }
-
-        static GeoResult fail(String source, String error) {
-            return new GeoResult(source, false, "", "", "", error);
-        }
-    }
-
-    private static final class Reachability {
-        final boolean ok;
-        final String detail;
-
-        Reachability(boolean ok, String detail) {
-            this.ok = ok;
-            this.detail = detail;
-        }
     }
 }
