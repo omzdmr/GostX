@@ -1,0 +1,55 @@
+name: Amnezia Diagnostic APK
+
+on:
+  push:
+    branches:
+      - amnezia-diagnostic
+    paths:
+      - 'android/amneziadiag/**'
+      - 'android/settings.gradle.kts'
+      - 'android/build.gradle.kts'
+      - 'android/gradle/**'
+      - 'android/gradlew*'
+      - '.github/workflows/amnezia-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build diagnostic APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :amneziadiag:assembleDebug
+
+      - name: Rename APK
+        run: |
+          cp android/amneziadiag/build/outputs/apk/debug/amneziadiag-debug.apk \
+             Amnezia-Diagnostic-v1.apk
+          sha256sum Amnezia-Diagnostic-v1.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Amnezia-Diagnostic-v1
+          path: Amnezia-Diagnostic-v1.apk
+          if-no-files-found: error
+          retention-days: 30
