@@ -18,6 +18,9 @@ jobs:
       - name: Apply legacy Lantern stability policy
         run: python3 scripts/apply_lantern_stability_v2.py
 
+      - name: Apply 500 MB UUID rotation policy
+        run: python3 scripts/apply_uuid_500mb_rotation.py
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
